@@ -14,6 +14,7 @@ from .._support.indexing import (
 
 from .._support.dtype import (
     bool,
+    bf16,
     i4,
     i8,
     i16,

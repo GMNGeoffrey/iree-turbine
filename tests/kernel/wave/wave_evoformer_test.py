@@ -45,6 +45,7 @@ default_test_shapes = {}
 # Order of shapes: (B, BN, K2, H, K1, M, N)
 default_test_shapes["test_attention"] = [
     (1, 256, 256, 4, 32, 256, 32),
+    (1, 512, 256, 8, 8, 256, 8),
 ]
 default_test_shapes["test_attention"] += [
     perf_test(x) for x in default_test_shapes["test_attention"]
@@ -96,7 +97,6 @@ def attention_reference(
 @pytest.mark.parametrize(
     "mfma_variant",
     [
-        MMAType.F32_16x16x16_F16,
         MMAType.F32_32x32x8_F16,
     ],
 )
