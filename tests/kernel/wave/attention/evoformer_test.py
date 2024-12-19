@@ -36,24 +36,25 @@ default_tile_sizes = [(1, 1, 32, 1, None, 64, 32)]
 
 # From: https://github.com/microsoft/DeepSpeed/blob/master/tests/unit/ops/deepspeed4science/test_DS4Sci_EvoformerAttention.py
 def attention_reference(
-    q_input: torch.Tensor,
-    k_input: torch.Tensor,
-    v_input: torch.Tensor,
-    biases: list[torch.Tensor],
+    q_input: torch.Tensor,      # B x BN x  M  x H x K1
+    k_input: torch.Tensor,      # B x BN x K2  x H x K1
+    v_input: torch.Tensor,      # B x BN x K2  x H x  N
+    biases: list[torch.Tensor], # B x BN x  1  x 1 x K2
+                                # B x  1 x  H  x M x K2
     sm_scale: float,
 ) -> torch.Tensor:
-    q = q_input.transpose(-2, -3)
-    k = k_input.transpose(-2, -3)
-    v = v_input.transpose(-2, -3)
-    k_t = k.transpose(-1, -2)
-    a = torch.matmul(q, k_t) * sm_scale
+    q = q_input.transpose(-2, -3)        # B x BN x H x  M x K1
+    k = k_input.transpose(-2, -3)        # B x BN x H x K2 x K1
+    v = v_input.transpose(-2, -3)        # B x BN x H x K2 x  N
+    k_t = k.transpose(-1, -2)            # B x BN x H x K1 x K2
+    a = torch.matmul(q, k_t) * sm_scale  # B x BN x H x  M x K2
 
     for b in biases:
-        a += b
+        a += b                           # B x BN x H x  M x K2
 
-    a = F.softmax(a, dim=-1)
-    a_v = torch.matmul(a, v)
-    o = a_v.transpose(-2, -3)
+    a = F.softmax(a, dim=-1)             # B x BN x H x  M x K2
+    a_v = torch.matmul(a, v)             # B x BN x H x  M x  N
+    o = a_v.transpose(-2, -3)            # B x BN x M x  H x  N
 
     return o
 
@@ -112,6 +113,21 @@ def testEvoformerAttentionForward(
             torch_dtype = torch.bfloat16
         else:
             torch_dtype = torch.float16
+
+        # # Order of shapes: (B, BN, K2, H, K1, M, N)
+        # default_test_shapes = [(1, 256, 256, 4, 32, 256, 32), (1, 512, 256, 8, 8, 256, 8)]
+        # B = batch
+        # BN = n
+        # K2 = kv_seq_len
+        # H = heads
+        # K1 = head_dim
+        # M = q_seq_len
+        # N = v_dim
+
+        # Simplification:
+        #  - kv_seq_len = q_seq_len (K2 = M)
+        #  - head_dim = v_dim (K1 = N)
+
         batch, n, kv_seq_len, heads, head_dim, q_seq_len, v_dim = shape
         q = device_randn(batch, n, q_seq_len, heads, head_dim, dtype=torch_dtype)
         k = device_randn(batch, n, kv_seq_len, heads, head_dim, dtype=torch_dtype)

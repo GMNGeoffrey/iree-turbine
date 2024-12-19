@@ -54,9 +54,9 @@ def get_evoformer_kernel(
     ratio_n = 1
     constraints: list[tkw.Constraint] = [tkw.WorkgroupConstraint(M, BLOCK_M, 0)]
     constraints += [tkw.WorkgroupConstraint(N, BLOCK_N, 1)]
-    constraints += [tkw.WorkgroupConstraint(B, BLOCK_B, 2)]
-    constraints += [tkw.WorkgroupConstraint(BN, BLOCK_BN, 3)]
-    constraints += [tkw.WorkgroupConstraint(H, BLOCK_H, 4)]
+    constraints += [tkw.WorkgroupConstraint(B, BLOCK_B, 2)] # batch
+    constraints += [tkw.WorkgroupConstraint(BN, BLOCK_BN, 3)] # batch
+    constraints += [tkw.WorkgroupConstraint(H, BLOCK_H, 4)] # batch
     constraints += [tkw.TilingConstraint(K2, BLOCK_K2)]
     constraints += [tkw.WaveConstraint(M, BLOCK_M / ratio_m)]
     constraints += [tkw.WaveConstraint(N, BLOCK_N / ratio_n)]
