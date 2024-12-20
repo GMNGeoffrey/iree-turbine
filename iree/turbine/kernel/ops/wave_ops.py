@@ -1388,7 +1388,10 @@ class GetResult(CustomOp):
     def infer_type(self):
         src_type = get_custom(self.value).type
         if isinstance(src_type, list):
-            self.type = src_type[self.res_idx]
+            try:
+                self.type = src_type[self.res_idx]
+            except Exception as e:
+                raise ValueError(f"{self.res_idx=}\n{self.value=}\n{src_type=}") from e
         else:
             self.type = src_type
 
@@ -1400,7 +1403,7 @@ class GetResult(CustomOp):
         )
         src_indexing = get_custom(self.value).indexing_dims
         if has_multiple_value(src_indexing):
-            assert self.res_idx <= len(src_indexing) - 1
+            assert self.res_idx <= len(src_indexing) - 1, f"{self=}"
             src_indexing = src_indexing[self.res_idx]
         assert is_valid_indexing_dim(src_indexing)
         return src_indexing
@@ -1654,11 +1657,14 @@ class Permute(CustomOp, ABC):
         src_to_target = {
             src: self.target_shape[src_shape.index(src)] for src in src_shape
         }
-        permuted_index = {
-            k: IndexSequence(v.start, v.size, index[src_to_target[k]].stride)
-            for k, v in index.items()
-            if k in src_shape
-        }
+        try:
+            permuted_index = {
+                k: IndexSequence(v.start, v.size, index[src_to_target[k]].stride)
+                for k, v in index.items()
+                if k in src_shape
+            }
+        except KeyError as e:
+            raise RuntimeError(f"{self.arg=}\n{self.target_shape=}\n{index=}\n{src_to_target=}") from e
         return permuted_index
 
 

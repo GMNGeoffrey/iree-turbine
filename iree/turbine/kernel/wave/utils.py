@@ -276,8 +276,11 @@ def is_reshape_needed(
         if dim not in vector_shapes:
             # Ignore nodes that are not used in both mmas.
             return False
-        if node_vector_shapes[dim] != vector_shapes[dim]:
-            return True
+        try:
+            if node_vector_shapes[dim] != vector_shapes[dim]:
+                return True
+        except KeyError as e:
+            raise RuntimeError(f"{node=}\n{node_vector_shapes=}\n{vector_shapes=}\n{dim=}") from e
     return False
 
 
@@ -339,13 +342,16 @@ def get_mma_dimensional_mapping(
         with mma.graph.inserting_before(mma.fx_node):
             arg = mma.lhs if arg_index == 0 else mma.rhs
             arg = get_custom(arg)
-            if is_reshape_needed(arg, mma.vector_shapes, prev_mma.vector_shapes):
-                reshape = Reshape(arg.fx_node, prev_mma.vector_shapes).add_to_graph(
-                    custom.graph
-                )
-                custom_reshape = get_custom(reshape)
-                custom_reshape.vector_shapes = custom.vector_shapes
-                custom.update_arg(arg_index, reshape)
+            try:
+                if is_reshape_needed(arg, mma.vector_shapes, prev_mma.vector_shapes):
+                    reshape = Reshape(arg.fx_node, prev_mma.vector_shapes).add_to_graph(
+                        custom.graph
+                    )
+                    custom_reshape = get_custom(reshape)
+                    custom_reshape.vector_shapes = custom.vector_shapes
+                    custom.update_arg(arg_index, reshape)
+            except RuntimeError as e:
+                raise RuntimeError(f"{arg_index=}\n{arg=}\n{mma=}\n{prev_mma=}\n{arg_index=}") from e
 
     def find_mma_in_slice(node: CustomOp) -> Optional[MMA]:
         """
