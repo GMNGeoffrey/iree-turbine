@@ -482,7 +482,7 @@ class LaunchableWave(Launchable):
                 )
                 return cached_kernel
 
-        # Recompile from kernel scratch if not found in cache.
+        # Recompile kernel from scratch if not found in cache.
         (
             mb,
             graph,

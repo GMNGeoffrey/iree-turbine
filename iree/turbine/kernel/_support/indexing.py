@@ -157,7 +157,7 @@ class IndexingContext:
         self.subs[symbol] = value
 
     def finalize(self):
-        assert len(self.frozen_subs) == 0
+        assert len(self.frozen_subs) == 0, f"{self.frozen_subs=}"
         # Go over everything we know and bind all free symbols.
         for _sb in self.shaped_bindings.values():
             for i in range(_sb.shaped_type.rank):

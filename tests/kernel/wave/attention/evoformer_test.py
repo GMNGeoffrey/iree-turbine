@@ -143,39 +143,55 @@ def testEvoformerAttentionForward(
         dk_sqrt = math.sqrt(1.0 / head_dim)
         # TODO: Add scaling of QK as part of kernel.
         # TODO: Add v-permute as part of kernel.
-        mb = evoformer_fwd(
-            q * dk_sqrt * log2e,
-            k,
-            v.permute([0, 1, 4, 3, 2]),
-            mask_bias,
-            bias * log2e,
-            output,
-            lse,
-        )
+        # mb = evoformer_fwd(
+        #     q * dk_sqrt * log2e,
+        #     k,
+        #     v.permute([0, 1, 4, 3, 2]),
+        #     mask_bias,
+        #     bias * log2e,
+        #     output,
+        #     lse,
+        # )
 
 
-        o = output
+        o = output.transpose(-2, -3)
         # pretend gradient from loss function
-        do = device_randn(batch, n, q_seq_len, heads, v_dim, dtype=torch_dtype)
+        do = device_randn(batch, n, heads, q_seq_len, v_dim, dtype=torch_dtype)
 
         # output tensors
-        dq = device_zeros(batch, n, q_seq_len, heads, head_dim, dtype=torch_dtype)
-        dk = device_zeros(batch, n, kv_seq_len, heads, head_dim, dtype=torch_dtype)
-        dv = device_zeros(batch, n, kv_seq_len, heads, v_dim, dtype=torch_dtype)
+        dq = device_zeros(batch, n, heads, q_seq_len, head_dim, dtype=torch_dtype)
+        dk = device_zeros(batch, n, heads, kv_seq_len, head_dim, dtype=torch_dtype)
+        dv = device_zeros(batch, n, heads, kv_seq_len, v_dim, dtype=torch_dtype)
         # dbias = device_zeros(batch, heads, q_seq_len, kv_seq_len, dtype=torch_dtype)
 
         # TODO: maybe compute this within the kernel? The description of the
         # backward pass in the Flash Attention 2 paper has it computed
         # external to both loops though.
         D = torch.sum(do * o, -1)
-        D = D.transpose(-1, -2)
+
+        q_perm = q.transpose(-2, -3)
+        k_perm = k.transpose(-2, -3)
+        v_perm = v.transpose(-2, -3)
+        # print(f"{shape=}")
+        # print(f"{do.shape=}\n{o.shape=}\n{D.shape=}\n{q_perm.shape=}\n{k_perm.shape=}\n{v_perm.shape=}\n{lse.shape}\n{dq.shape=}\n{dk.shape=}\n{dv.shape=}")
+
+
+        # (B, BN, K2, H, K1, M, N)
+        # (1, 512, 128, 4, 16, 256, 8)
+        # 1=B
+        # 512=BN
+        # 128=K2
+        # 4=H
+        # 16=K1
+        # 256=M
+        # 8=N
 
         mb_bwd = evoformer_bwd(
             do,
             D,
-            q * dk_sqrt * log2e,
-            k,
-            v.permute([0, 1, 4, 3, 2]),
+            q_perm * dk_sqrt * log2e,
+            k_perm,
+            v_perm,
             # mask_bias,
             # bias,
             # o,
@@ -196,6 +212,6 @@ def testEvoformerAttentionForward(
                 f.write(mb.module_op.get_asm())
 
         eps = 1e-2 if output.dtype == torch.float16 else 5e-2
-        # assert (
-        #     torch.max(torch.abs(torch_ref - output)).item() < eps
-        # ), f"out eps: {torch.max(torch.abs(torch_ref - output))}"
+        assert (
+            torch.max(torch.abs(torch_ref - output)).item() < eps
+        ), f"out eps: {torch.max(torch.abs(torch_ref - output))}"

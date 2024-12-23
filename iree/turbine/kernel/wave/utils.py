@@ -311,7 +311,10 @@ def get_mma_dimensional_mapping(
         lhs_shape = custom.lhs_type.symbolic_shape
         rhs_shape = custom.rhs_type.symbolic_shape
         acc_shape = custom.acc_type.symbolic_shape
-        k = ((set(lhs_shape) & set(rhs_shape)) - set(acc_shape)).pop()
+        try:
+            k = ((set(lhs_shape) & set(rhs_shape)) - set(acc_shape)).pop()
+        except KeyError as e:
+            raise RuntimeError(f"{node}:\n{lhs_shape=}\n{rhs_shape=}\n{acc_shape=}\n{custom.lhs=}\n{custom.rhs=}\n{custom.acc=}") from e
         if custom not in mapping:
             mapping[custom] = {}
         mapping[custom][m] = MMAOperand.M

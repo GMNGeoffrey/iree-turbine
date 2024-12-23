@@ -803,8 +803,11 @@ def resolve_thread_shapes(trace: CapturedTrace, constraints: list[Constraint]):
         lhs = get_custom(custom.lhs)
         rhs = get_custom(custom.rhs)
 
-        lhs_dim, lhs_size = get_largest_index_and_size(get_index(lhs))
-        rhs_dim, rhs_size = get_largest_index_and_size(get_index(rhs))
+        lhs_index = get_index(lhs)
+        rhs_index = get_index(rhs)
+
+        lhs_dim, lhs_size = get_largest_index_and_size(lhs_index)
+        rhs_dim, rhs_size = get_largest_index_and_size(rhs_index)
 
         # If they are equal we are done.
         if lhs_dim == rhs_dim and lhs_size == rhs_size:
@@ -816,6 +819,17 @@ def resolve_thread_shapes(trace: CapturedTrace, constraints: list[Constraint]):
         if lhs_size > 1 and rhs_size > 1:
             raise NotImplementedError(
                 "Currently only support resolving discrepancies when one of the shapes is 1."
+                f"\n{binary_op=}"
+                f"\n{lhs=}"
+                f"\n{lhs_index=}"
+                f"\n{lhs_dim=}"
+                f"\n{lhs_size=}"
+                f"\n{lhs.type.symbolic_shape=}"
+                f"\n{rhs=}"
+                f"\n{rhs_index=}"
+                f"\n{rhs_dim=}"
+                f"\n{rhs_size=}"
+                f"\n{rhs.type.symbolic_shape=}"
             )
 
         broadcast_rhs = lhs_size > rhs_size
