@@ -2,6 +2,7 @@
 .env
 .vs/
 .vscode/
+*.code-workspace
 *.sdf
 *.opensdf
 *.VC.opendb
