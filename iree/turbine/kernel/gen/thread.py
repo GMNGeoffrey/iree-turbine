@@ -4,6 +4,7 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+import time
 from typing import (
     Type,
     Callable,
@@ -114,8 +115,10 @@ class LaunchableThread(Launchable):
         context: Optional[Context] = None,
         module_op: Optional[Operation] = None,
     ):
+        start = time.perf_counter()
         # Trace the function.
         trace = self._trace()
+        print(f"Tracing finished. Cumulative: {time.perf_counter() - start}")
         idxc = IndexingContext.current()
 
         sig = self._sig
@@ -131,10 +134,12 @@ class LaunchableThread(Launchable):
                 idxc.bind_shaped(arg_name, param_type, list(arg_value.shape))
 
         idxc.finalize()
+        print(f"Index finalizing finished. Cumulative: {time.perf_counter() - start}")
 
         kernel_sig = kernel_codegen.KernelSignature()
         kernel_sig.add_from_graph_placeholders(trace.get_root_graph())
         kernel_sig.add_grid(self.grid_type)
+        print(f"Kernel signature created. Cumulative: {time.perf_counter() - start}")
 
         grid = self.grid_type()
 
@@ -145,8 +150,10 @@ class LaunchableThread(Launchable):
         emitter = vector_codegen.ThreadEmitter(dispatch_entrypoint, trace)
         emitter.emit()
         emitter.finish()
+        print(f"Emitter finished. Cumulative: {time.perf_counter() - start}")
 
         mb.module_op.verify()
+        print(f"Verification finished. Cumulative: {time.perf_counter() - start}")
 
         return mb, exe, kernel_sig, entrypoint_name
 

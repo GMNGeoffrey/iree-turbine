@@ -36,6 +36,8 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "validate_only: validation test, never runs with '--runperf'"
     )
+    config.addinivalue_line("markers", "scheduling: scheduling test")
+    config.addinivalue_line("markers", "dynamic_dims: test with dynamic shapes")
 
 
 def _set_default_device(config):
@@ -71,9 +73,16 @@ def pytest_collection_modifyitems(config, items):
 
         is_validate_only = _has_marker(item, "validate_only")
         is_perf_only = _has_marker(item, "perf_only")
+        is_scheduling = _has_marker(item, "scheduling")
+        has_dynamic_dims = _has_marker(item, "dynamic_dims")
         if run_perf:
             if not is_perf_only or is_validate_only:
                 item.add_marker(pytest.mark.skip("skip non-perf test"))
         else:
             if is_perf_only:
                 item.add_marker(pytest.mark.skip("skip perf test"))
+
+        if is_scheduling:
+            item.add_marker(pytest.mark.skip("skip scheduling test"))
+        if has_dynamic_dims:
+            item.add_marker(pytest.mark.skip("skip dynamic shapes test"))

@@ -45,6 +45,14 @@ enable_scheduling_barriers = int(os.environ.get("WAVE_USE_SCHED_BARRIERS", 0))
 
 # Add test shapes for validation and performance testing.
 perf_test = lambda *a: pytest.param(*a, marks=pytest.mark.perf_only)
+scheduling_test = lambda *a: pytest.param(*a, marks=pytest.mark.scheduling)
+dynamic_dims_test = lambda *a: pytest.param(*a, marks=pytest.mark.dynamic_dims)
+
+param_scheduling = pytest.mark.parametrize("enable_scheduling", [False, scheduling_test(True)], ids=["no_sched", "sched"])
+param_no_scheduling = pytest.mark.parametrize("enable_scheduling", [False], ids=["no_sched"])
+param_dynamic_dims = pytest.mark.parametrize("dynamic_dims", [False, dynamic_dims_test(True)], ids=["no_dyn", "dyn"])
+param_no_dynamic_dims = pytest.mark.parametrize("dynamic_dims", [False], ids=["no_dyn"])
+
 default_test_shapes = {}
 # Order of shapes: (B, M, N, K1, K2)
 default_test_shapes["test_attention"] = [
@@ -73,7 +81,7 @@ def get_test_shapes(test_name: str) -> list[tuple[int]]:
 
 @require_e2e
 @pytest.mark.parametrize("shape", get_test_shapes("test_attention"))
-@pytest.mark.parametrize("enable_scheduling", [False])
+@param_no_scheduling
 @pytest.mark.parametrize(
     "mfma_variant",
     [
@@ -215,7 +223,7 @@ def testChainedGemm(
 @require_e2e
 @require_cdna3
 @pytest.mark.parametrize("shape", get_test_shapes("test_attention"))
-@pytest.mark.parametrize("enable_scheduling", [False])
+@param_no_scheduling
 @pytest.mark.parametrize(
     "mfma_variant",
     [
@@ -355,8 +363,8 @@ def testChainedGemmF8(
 
 @require_e2e
 @pytest.mark.parametrize("shape", get_test_shapes("test_attention"))
-@pytest.mark.parametrize("enable_scheduling", [False, True])
-@pytest.mark.parametrize("dynamic_dims", [False, True])
+@param_scheduling
+@param_dynamic_dims
 @pytest.mark.parametrize(
     "mfma_variant",
     [
@@ -549,8 +557,8 @@ def testAttention(
 
 @require_e2e
 @pytest.mark.parametrize("shape", get_test_shapes("test_attention"))
-@pytest.mark.parametrize("enable_scheduling", [False])
-@pytest.mark.parametrize("dynamic_dims", [False, True])
+@param_no_scheduling
+@param_dynamic_dims
 @pytest.mark.parametrize(
     "mfma_variant",
     [
@@ -754,7 +762,7 @@ def testAttentionBias(
 @require_e2e
 @require_cdna3
 @pytest.mark.parametrize("shape", get_test_shapes("test_attention"))
-@pytest.mark.parametrize("enable_scheduling", [False, True])
+@param_scheduling
 @pytest.mark.parametrize(
     "mfma_variant",
     [
@@ -915,8 +923,8 @@ def testAttentionF8(
 
 @require_e2e
 @pytest.mark.parametrize("shape", get_test_shapes("test_attention"))
-@pytest.mark.parametrize("enable_scheduling", [False])
-@pytest.mark.parametrize("dynamic_dims", [False])
+@param_no_scheduling
+@param_no_dynamic_dims
 @pytest.mark.parametrize(
     "mfma_variant",
     [
