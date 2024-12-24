@@ -379,19 +379,16 @@ def testFlashAttention2SimpleFwdBwd(
     B = tkl.sym.B # batch
     # Even if the sequence lengths are the same size, we still need different
     # symbols for their dimensions because they are tiled separately.
-    M = tkl.sym.M # query sequence length
-    N = tkl.sym.N # key/value sequence length
-    D = tkl.sym.D # head dimension
-        # q: tkl.Memory[B, M, K1, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        # k: tkl.Memory[B, K2, K1, ADDRESS_SPACE, tkl.f16],
-        # v: tkl.Memory[B, N, K2, ADDRESS_SPACE, tkl.f16],
-        # c: tkl.Memory[B, M, N, GLOBAL_ADDRESS_SPACE, tkl.f32],
+    Nq = tkl.sym.Nq # query sequence length
+    Nkv = tkl.sym.Nkv # key/value sequence length
+    Dv = tkl.sym.Dv # head dimension
+    Dqk = tkl.sym.Dqk
 
     # Workgroup tile sizes
     BLOCK_B = tkl.sym.BLOCK_B
-    BLOCK_M = tkl.sym.BLOCK_M
-    BLOCK_N = tkl.sym.BLOCK_N
-    BLOCK_D = tkl.sym.BLOCK_D
+    BLOCK_Nq = tkl.sym.BLOCK_Nq
+    BLOCK_Dv = tkl.sym.BLOCK_Dv
+    BLOCK_Nkv = tkl.sym.BLOCK_Nkv
     # Address space (for GPU, shared(1) or global(0))
     ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
     # Other hyperparameters
@@ -399,73 +396,77 @@ def testFlashAttention2SimpleFwdBwd(
     STORE_ELEMS_PER_THREAD = tkl.sym.STORE_ELEMS_PER_THREAD
 
     # Expose user-constraints
-    constraints: list[tkw.Constraint] = [tkw.WorkgroupConstraint(M, BLOCK_M, 0)]
-    constraints += [tkw.WorkgroupConstraint(D, BLOCK_D, 1)]
-    constraints += [tkw.TilingConstraint(N, BLOCK_N)]
-    constraints += [tkw.WaveConstraint(M, BLOCK_M / 4)]
-    constraints += [tkw.WaveConstraint(D, BLOCK_D / 1)]
+    constraints: list[tkw.Constraint] = [tkw.WorkgroupConstraint(Nq, BLOCK_Nq, 0)]
+    constraints += [tkw.WorkgroupConstraint(Dv, BLOCK_Dv, 1)]
+    constraints += [tkw.WorkgroupConstraint(B, BLOCK_B, 2)]
+    constraints += [tkw.TilingConstraint(Nkv, BLOCK_Nkv)]
+    constraints += [tkw.WaveConstraint(Nq, BLOCK_Nq / 4)]
+    constraints += [tkw.WaveConstraint(Dv, BLOCK_Dv / 1)]
 
     if mfma_variant == MMAType.F32_16x16x16_F16:
-        Mvec = 16
-        Dvec = 16
+        Nq_vec = 16
+        Dv_vec = 16
     if mfma_variant == MMAType.F32_32x32x8_F16:
-        Mvec = 32
-        Dvec = 32
+        Nq_vec = 32
+        Dv_vec = 32
 
     constraints += [
         tkw.HardwareConstraint(
             threads_per_wave=64,
             waves_per_block=(4, 1, 1),
             mma_type=mfma_variant,
-            vector_shapes={B: 0, M: Mvec, D: Dvec},
+            vector_shapes={B: 0, Nq: Nq_vec, Dv: Dv_vec},
         )
     ]
-
-    # if dynamic_dims:
-    #     constraints += [tkw.Assumption(M > BLOCK_D * 4)]
 
     i = tkw.IndexMapping.iterator(0)
     j = tkw.IndexMapping.iterator(1)
     k = tkw.IndexMapping.iterator(2)
     mapping = tkw.IndexMapping(
-        num_iterators=3, inputs={B: i, D: j, N: k}, outputs={B: i, N: k, D: j}
+        num_iterators=3, inputs={B: i, Dv: j, Nkv: k}, outputs={B: i, Nkv: k, Dv: j}
     )
+
+    # Name : Flash2 : Wave
+    # Query sequence length : M : M
+    # KV sequence length : N : K2
+    # Head dimension : D : K1/N
 
     @tkw.wave(constraints)
     def base_attention(
-        Q: tkl.Memory[B, M, D, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        KT: tkl.Memory[B, D, N, ADDRESS_SPACE, tkl.f16],
-        V: tkl.Memory[B, N, D, ADDRESS_SPACE, tkl.f16],
-        O: tkl.Memory[B, M, D, GLOBAL_ADDRESS_SPACE, tkl.f32],
+        Q: tkl.Memory[B, Nq, Dqk, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        KT: tkl.Memory[B, Dqk, Nkv, ADDRESS_SPACE, tkl.f16],
+        V: tkl.Memory[B, Nkv, Dv, ADDRESS_SPACE, tkl.f16],
+        O: tkl.Memory[B, Nq, Dv, GLOBAL_ADDRESS_SPACE, tkl.f32],
     ):
-        init_O = tkl.Register[B, M, D, tkl.f32](0.0)
-        init_l = tkl.Register[B, M, tkl.f32](0.0)
-        init_m = tkl.Register[B, M, tkl.f32](-1e6)
+        init_O = tkl.Register[B, Nq, Dv, tkl.f32](0.0)
+        init_l = tkl.Register[B, Nq, tkl.f32](0.0)
+        init_m = tkl.Register[B, Nq, tkl.f32](-1e6)
 
-        @tkw.reduction(N, init_args=[init_m, init_l, init_O])
+        @tkw.reduction(Nkv, init_args=[init_m, init_l, init_O])
         def repeat(
-            m_jm1: tkl.Register[B, M, tkl.f32],
-            l_jm1: tkl.Register[B, M, tkl.f32],
-            O_jm1: tkl.Register[B, M, D, tkl.f32],
+            m_jm1: tkl.Register[B, Nq, tkl.f32],
+            l_jm1: tkl.Register[B, Nq, tkl.f32],
+            O_jm1: tkl.Register[B, Nq, Dv, tkl.f32],
         ) -> (
-            tkl.Register[B, M, tkl.f32],
-            tkl.Register[B, M, tkl.f32],
-            tkl.Register[B, M, D, tkl.f32],
+            tkl.Register[B, Nq, tkl.f32],
+            tkl.Register[B, Nq, tkl.f32],
+            tkl.Register[B, Nq, Dv, tkl.f32],
         ):
-            S_acc = tkl.Register[B, M, N, tkl.f32](0.0)
-            Q_reg = tkw.read(Q, elements_per_thread=LOAD_ELEMS_PER_THREAD) # BxMxD f16
-            KT_reg = tkw.read(KT, elements_per_thread=LOAD_ELEMS_PER_THREAD) # BxDxN f16
-            S_j = tkw.mma(Q_reg, KT_reg, S_acc) # BxMxN f32
-            m_j = tkw.max(S_j, m_jm1, dim=N) # BxM f32
-            m_j_broadcast = tkw.broadcast(m_j, target_shape=[B, M, N]) # BxMxN f32
-            P_j = tkw.exp2(S_j - m_j_broadcast) # BxMxN f32
-            e_delta_max = tkw.exp2(m_jm1 - m_j) # BxM f32
-            l_init = l_jm1 * e_delta_max # BxM f32
-            l_j = tkw.sum(P_j, l_init, dim=N) # BxM f32
-            P_j_f16 = tkw.cast(P_j, tkl.f16) # BxMxN f16
-            V_reg = tkw.read(V, elements_per_thread=LOAD_ELEMS_PER_THREAD) # BxNxD f16
-            O_init = O_jm1 * e_delta_max # BxMxD f32
-            O_j = tkw.mma(P_j_f16, V_reg, O_init) # BxMxD f32
+            S_acc = tkl.Register[B, Nq, Nkv, tkl.f32](0.0)
+            Q_reg = tkw.read(Q, elements_per_thread=LOAD_ELEMS_PER_THREAD) # BxNqxDqk f16
+            KT_reg = tkw.read(KT, elements_per_thread=LOAD_ELEMS_PER_THREAD) # BxDqkxNkv f16
+            S_j = tkw.mma(Q_reg, KT_reg, S_acc) # BxNqxNkv f32
+            m_j = tkw.max(S_j, m_jm1, dim=Nkv) # BxNq f32
+            # TODO: figure out why this has to be explicit
+            m_j_broadcast = tkw.broadcast(m_j, target_shape=[B, Nq, Nkv]) # BxNqxNkv f32
+            e_delta_max = tkw.exp2(m_jm1 - m_j) # BxNq f32
+            P_j = tkw.exp2(S_j - m_j_broadcast) # BxNqxNkv f32
+            l_init = l_jm1 * e_delta_max # BxNq f32
+            l_j = tkw.sum(P_j, l_init, dim=Nkv) # BxNq f32
+            P_j_f16 = tkw.cast(P_j, tkl.f16) # BxNqxNkv f16
+            V_reg = tkw.read(V, elements_per_thread=LOAD_ELEMS_PER_THREAD) # BxNkvxDv f16
+            O_init = O_jm1 * e_delta_max # BxNqxDv f32
+            O_j = tkw.mma(P_j_f16, V_reg, O_init) # BxNqxDv f32
             return m_j, l_j, O_j
 
         # repeat represents the results of the loop
@@ -473,20 +474,20 @@ def testFlashAttention2SimpleFwdBwd(
         reciprocal_l_i = tkw.reciprocal(l_i)
         res = O_i * reciprocal_l_i
         res_O_casted = tkw.cast(res, tkl.f16)
-        tkw.write(res_O_casted, O, mapping=mapping, elements_per_thread=STORE_ELEMS_PER_THREAD)
+        tkw.write(res_O_casted, O, elements_per_thread=STORE_ELEMS_PER_THREAD)
 
     hyperparams = {
         ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
         LOAD_ELEMS_PER_THREAD: get_mfma_load_elems_per_thread(mfma_variant),
         STORE_ELEMS_PER_THREAD: get_mfma_store_elems_per_thread(mfma_variant),
         BLOCK_B: 1,
-        BLOCK_M: 128,
-        BLOCK_N: 64,
-        BLOCK_D: 64,
+        BLOCK_Nq: 128,
+        BLOCK_Nkv: 64,
+        BLOCK_Dv: 64,
         B: batch,
-        M: seq_len,
-        N: seq_len,
-        D: head_dim,
+        Nq: seq_len,
+        Nkv: seq_len,
+        Dv: head_dim,
     }
     hyperparams.update(get_default_scheduling_params())
     config = get_default_run_config()
@@ -548,6 +549,202 @@ def testFlashAttention2SimpleFwdBwd(
         assert_allclose(output, torch_ref)
 
 
+
+@require_e2e
+@pytest.mark.parametrize("shape", get_test_shapes("test_attention"))
+@param_scheduling
+@param_dynamic_dims
+@pytest.mark.parametrize(
+    "mfma_variant",
+    [
+        MMAType.F32_16x16x16_F16,
+        MMAType.F32_32x32x8_F16,
+    ],
+)
+def testAttentionPaperSymbols(
+    shape: tuple[int],
+    enable_scheduling: bool,
+    dynamic_dims: bool,
+    mfma_variant: MMAType,
+    request,
+):
+    run_bench = request.config.getoption("--runperf")
+    dump_perf = request.config.getoption("--dump-perf-files-path")
+
+    batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
+
+    # Input sizes
+    B = tkl.sym.B # batch
+    Nq = tkl.sym.Nq # query sequence length
+    Dv = tkl.sym.Dv # value head dimension
+    Dqk = tkl.sym.Dqk # query/key head dimension
+    Nkv = tkl.sym.Nkv # key/value sequence length
+    # Workgroup tile sizes
+    BLOCK_B = tkl.sym.BLOCK_B
+    BLOCK_Nq = tkl.sym.BLOCK_Nq
+    BLOCK_Dv = tkl.sym.BLOCK_Dv
+    BLOCK_Nkv = tkl.sym.BLOCK_Nkv
+    # Address space (for GPU, shared(1) or global(0))
+    ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
+    # Other hyperparameters
+    LOAD_ELEMS_PER_THREAD = tkl.sym.LOAD_ELEMS_PER_THREAD
+    STORE_ELEMS_PER_THREAD = tkl.sym.STORE_ELEMS_PER_THREAD
+
+    # Expose user-constraints
+    constraints: list[tkw.Constraint] = [tkw.WorkgroupConstraint(Nq, BLOCK_Nq, 0)]
+    constraints += [tkw.WorkgroupConstraint(Dv, BLOCK_Dv, 1)]
+    constraints += [tkw.WorkgroupConstraint(B, BLOCK_B, 2)]
+    constraints += [tkw.TilingConstraint(Nkv, BLOCK_Nkv)]
+    constraints += [tkw.WaveConstraint(Nq, BLOCK_Nq / 4)]
+    constraints += [tkw.WaveConstraint(Dv, BLOCK_Dv / 1)]
+
+    if mfma_variant == MMAType.F32_16x16x16_F16:
+        Nq_vec = 16
+        Dv_vec = 16
+    if mfma_variant == MMAType.F32_32x32x8_F16:
+        Nq_vec = 32
+        Dv_vec = 32
+
+    constraints += [
+        tkw.HardwareConstraint(
+            threads_per_wave=64,
+            waves_per_block=(4, 1, 1),
+            mma_type=mfma_variant,
+            vector_shapes={B: 0, Nq: Nq_vec, Dv: Dv_vec},
+        )
+    ]
+
+    if dynamic_dims:
+        constraints += [tkw.Assumption(Nkv > BLOCK_Nkv * 4)]
+
+    i = tkw.IndexMapping.iterator(0)
+    j = tkw.IndexMapping.iterator(1)
+    k = tkw.IndexMapping.iterator(2)
+    mapping = tkw.IndexMapping(
+        num_iterators=3, inputs={B: i, Dv: j, Nq: k}, outputs={B: i, Nq: k, Dv: j}
+    )
+
+    @tkw.wave(constraints)
+    def base_attention(
+        Q: tkl.Memory[B, Nq, Dqk, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        K: tkl.Memory[B, Nkv, Dqk, ADDRESS_SPACE, tkl.f16],
+        VT: tkl.Memory[B, Dv, Nkv, ADDRESS_SPACE, tkl.f16],
+        O: tkl.Memory[B, Nq, Dv, GLOBAL_ADDRESS_SPACE, tkl.f32],
+    ):
+        init_O = tkl.Register[B, Dv, Nq, tkl.f32](0.0)
+        init_l = tkl.Register[B, Nq, tkl.f32](0.0)
+        init_m = tkl.Register[B, Nq, tkl.f32](-1e6)
+
+        # This microkernel encodes the fact that if the reduction
+        # dimension were tiled, then we would need to materialize a loop.
+        @tkw.reduction(Nkv, init_args=[init_m, init_l, init_O])
+        def repeat(
+            m_jm1: tkl.Register[B, Nq, tkl.f32],
+            l_jm1: tkl.Register[B, Nq, tkl.f32],
+            O_jm1: tkl.Register[B, Dv, Nq, tkl.f32],
+        ) -> (
+            tkl.Register[B, Nq, tkl.f32],
+            tkl.Register[B, Nq, tkl.f32],
+            tkl.Register[B, Dv, Nq, tkl.f32],
+        ):
+            S_acc = tkl.Register[B, Nkv, Nq, tkl.f32](0.0)
+            Q_reg = tkw.read(Q, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            K_reg = tkw.read(K, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            S_j = tkw.mma(K_reg, Q_reg, S_acc)
+            x_j = tkw.permute(S_j, target_shape=[B, Nq, Nkv])
+            m_j = tkw.max(x_j, m_jm1, dim=Nkv)
+            e_delta_max = tkw.exp2(m_jm1 - m_j)
+            P_j = tkw.exp2(x_j - m_j)
+            l_init = l_jm1 * e_delta_max
+            l_j = tkw.sum(P_j, l_init, dim=Nkv)
+            P_j_f16 = tkw.cast(P_j, tkl.f16)
+            V_reg = tkw.read(VT, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            O_init = O_jm1 * e_delta_max
+            O_j = tkw.mma(V_reg, P_j_f16, O_init)
+            return m_j, l_j, O_j
+
+        # repeat represents the results of the loop
+        m_i, l_i, O_i = repeat
+        reciprocal_sum = tkw.reciprocal(l_i)
+        res = O_i * reciprocal_sum
+        tkw.write(res, O, mapping=mapping, elements_per_thread=STORE_ELEMS_PER_THREAD)
+
+    hyperparams = {
+        ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
+        LOAD_ELEMS_PER_THREAD: get_mfma_load_elems_per_thread(mfma_variant),
+        STORE_ELEMS_PER_THREAD: get_mfma_store_elems_per_thread(mfma_variant),
+        BLOCK_B: 1,
+        BLOCK_Nq: 128,
+        BLOCK_Dv: 64,
+        BLOCK_Nkv: 64,
+        B: batch,
+        Nq: q_seq_len,
+        Dv: v_head_dim,
+        Dqk: qk_head_dim,
+        Nkv: kv_seq_len,
+    }
+    hyperparams.update(get_default_scheduling_params())
+    config = get_default_run_config()
+    if run_bench:
+        config["benchmark_batch_size"] = 10
+        config["benchmark_repetitions"] = 3
+    if dump_perf is not None:
+        perf_filename = request.node.name + ".json"
+        config["benchmark_results_file"] = os.path.join(
+            dump_perf, "tk_" + perf_filename
+        )
+    compile_config = {"waves_per_eu": 2, "denorm_fp_math_f32": "preserve-sign"}
+
+    dynamic_symbols = []
+    dynamic_symbols_map = {}
+    if dynamic_dims:
+        dynamic_symbols_map[Nq] = hyperparams[Nq]
+        dynamic_symbols_map[Dv] = hyperparams[Dv]
+        dynamic_symbols_map[B] = hyperparams[B]
+        dynamic_symbols_map[Nkv] = hyperparams[Nkv]
+        dynamic_symbols.append(Nq)
+        dynamic_symbols.append(Dv)
+        dynamic_symbols.append(B)
+        dynamic_symbols.append(Nkv)
+        del hyperparams[Nq]
+        del hyperparams[Dv]
+        del hyperparams[B]
+        del hyperparams[Nkv]
+
+    with tk.gen.TestLaunchContext(
+        hyperparams,
+        canonicalize=True,
+        run=True,
+        run_bench=run_bench,
+        run_config=config,
+        compile_config=compile_config,
+        schedule=enable_scheduling,
+        use_scheduling_barriers=enable_scheduling_barriers,
+        dynamic_symbols=dynamic_symbols,
+        dynamic_symbols_map=dynamic_symbols_map,
+    ):
+        torch.manual_seed(0)
+        q = device_randn(batch, q_seq_len, qk_head_dim, dtype=torch.float16)
+        k = device_randn(batch, kv_seq_len, qk_head_dim, dtype=torch.float16)
+        v = device_randn(batch, kv_seq_len, v_head_dim, dtype=torch.float16)
+        output = device_zeros(batch, q_seq_len, v_head_dim, dtype=torch.float32)
+        log2e = 1.44269504089
+        dk_sqrt = math.sqrt(1.0 / qk_head_dim)
+        # TODO: Add scaling of QK as part of kernel.
+        # TODO: Add variant of non-transposed V attention kernel.
+        mb = base_attention(q * dk_sqrt * log2e, k, v.permute([0, 2, 1]), output)
+        torch_ref = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=None
+        )
+
+        if test_dump_generated_mlir:
+            filename = f"wave_attention_{'x'.join(map(str, shape))}.mlir"
+            with open(filename, "w") as f:
+                f.write(mb.module_op.get_asm())
+
+        assert_allclose(output, torch_ref)
+
+
 @require_e2e
 @pytest.mark.parametrize("shape", get_test_shapes("test_attention"))
 @param_scheduling
@@ -569,11 +766,11 @@ def testAttention(
     run_bench = request.config.getoption("--runperf")
     dump_perf = request.config.getoption("--dump-perf-files-path")
     # Input sizes
-    B = tkl.sym.B
-    M = tkl.sym.M
-    N = tkl.sym.N
-    K1 = tkl.sym.K1
-    K2 = tkl.sym.K2
+    B = tkl.sym.B # batch
+    M = tkl.sym.M # query sequence length
+    N = tkl.sym.N # value head dimension
+    K1 = tkl.sym.K1 # query/key head dimension
+    K2 = tkl.sym.K2 # key/value sequence length
     # Workgroup tile sizes
     BLOCK_B = tkl.sym.BLOCK_B
     BLOCK_M = tkl.sym.BLOCK_M
@@ -588,6 +785,7 @@ def testAttention(
     # Expose user-constraints
     constraints: list[tkw.Constraint] = [tkw.WorkgroupConstraint(M, BLOCK_M, 0)]
     constraints += [tkw.WorkgroupConstraint(N, BLOCK_N, 1)]
+    constraints += [tkw.WorkgroupConstraint(B, BLOCK_B, 2)]
     constraints += [tkw.TilingConstraint(K2, BLOCK_K2)]
     constraints += [tkw.WaveConstraint(M, BLOCK_M / 4)]
     constraints += [tkw.WaveConstraint(N, BLOCK_N / 1)]
