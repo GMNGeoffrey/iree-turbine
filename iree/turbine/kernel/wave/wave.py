@@ -4,6 +4,7 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+import functools
 from typing import Any, Callable, Optional
 import torch.fx as fx
 import inspect
@@ -314,53 +315,80 @@ class LaunchableWave(Launchable):
         module_op: Optional[Operation] = None,
     ) -> CapturedTrace:
         # Trace the function.
+        print("Tracing kernel")
         graph = self._trace()
+        print("Done tracing")
+        print(graph, "\n")
 
         initialize_iter_args(graph)
         self.create_induction_vars(graph)
-        self.initialize_wave_constraints(graph)
-        self.initialize_reductions(graph)
-        self.initialize_symbolic_constraints(graph)
-        self.initialize_workgroup_constraints(graph)
+        print("Done create_induction_vars")
+        for k, v in self.induction_vars.items():
+            print(f"{k}: {v}")
+        print()
+
+        graph_passes = [
+            self.initialize_wave_constraints,
+            self.initialize_reductions,
+            self.initialize_symbolic_constraints,
+            self.initialize_workgroup_constraints,
+        ]
+
+        for p in graph_passes:
+            try:
+                p(graph)
+            except Exception as e:
+                raise RuntimeError(f"Error in pass: {p.__name__}") from e
+            # print(f"After {p.__name__}:\n{graph}\n")
 
         idxc = IndexingContext.current()
         idxc.finalize()
+        print(f"After finalize indexing context: {idxc}")
 
         # Initialize Vector shapes
         self.hardware_constraints[0].subs_vector_shapes(idxc.subs)
+        print(f"Ater {self.hardware_constraints[0].subs_vector_shapes.__name__}: {self.hardware_constraints[0].vector_shapes}")
 
-        # Do type inference.
-        infer_types(graph)
+        class CurryConstraints:
+            def __init__(self, graph_tform: Callable[[CapturedTrace, list[Constraint]], None], constraints: list[Constraint]):
+                self.graph_tform = graph_tform
+                self.constraints = constraints
+                self.__name__ = graph_tform.__name__
 
-        # Promote the placeholders to the appropriate address space.
-        promote_placeholders(graph, self.constraints)
+            def __call__(self, graph: CapturedTrace):
+                self.graph_tform(graph, self.constraints)
 
-        # Set indices.
-        set_node_indices(graph, self.constraints)
+        def curry_constraints(graph_tform: Callable[[CapturedTrace, list[Constraint]], None]):
+            return CurryConstraints(graph_tform, self.constraints)
 
-        # Expansion
-        expand_graph(graph, self.constraints)
+        graph_passes = [
+            # Do type inference.
+            infer_types,
+            # Promote the placeholders to the appropriate address space.
+            curry_constraints(promote_placeholders),
+            # Set indices.
+            curry_constraints(set_node_indices),
+            # Expansion
+            curry_constraints(expand_graph),
+            # Set post expansion indices.
+            curry_constraints(set_post_expansion_indices),
+            # Clean up chains of GetResults
+            remove_chained_getresult,
+            # Optimizations.
+            curry_constraints(hoist_loop_invariant_ops),
+            curry_constraints(minimize_global_loads),
 
-        # Set post expansion indices.
-        set_post_expansion_indices(graph, self.constraints)
+            # Apply shared memory indexing corrections.
+            curry_constraints(apply_shared_memory_indexing_corrections),
 
-        # Clean up chains of GetResults
-        remove_chained_getresult(graph)
+            # Partition strided operators.
+            curry_constraints(partition_ops_with_gpr_offsets),
+            curry_constraints(partition_strided_operators),
+            remove_chained_extractslice,
 
-        # Optimizations.
-        hoist_loop_invariant_ops(graph, self.constraints)
-        minimize_global_loads(graph, self.constraints)
-
-        # Apply shared memory indexing corrections.
-        apply_shared_memory_indexing_corrections(graph, self.constraints)
-
-        # Partition strided operators.
-        partition_ops_with_gpr_offsets(graph, self.constraints)
-        partition_strided_operators(graph, self.constraints)
-        remove_chained_extractslice(graph)
-
-        # Decompose reduce Ops.
-        decompose_reduce_ops(graph, self.constraints, idxc.subs)
+            # Decompose reduce Ops.
+            curry_constraints(decompose_reduce_ops),
+        ]
 
         # Schedule the reduction ops.
         # Scheduling should always be used with use_scheduling_barriers=True,
@@ -373,15 +401,28 @@ class LaunchableWave(Launchable):
         # [Manually resolve conflicts consistent with the PR]
         if kwargs.get("schedule", False):
             use_scheduling_barriers = kwargs.get("use_scheduling_barriers", False)
-            schedule_graph(graph, self.constraints, use_scheduling_barriers)
+            curried = functools.partial(schedule_graph, constraints=self.constraints, use_scheduling_barriers=use_scheduling_barriers)
+            curried.__name__ = schedule_graph.__name__
+            graph_passes.append(curried)
 
         # Align sizes to WG/Tile sizes
         # This pass changes indexing keys, which can interfere with other passes,
         # so it should be called close to the end of pipeline.
-        align_index_sizes(graph, self.constraints)
+        graph_passes.extend([
+            curry_constraints(align_index_sizes),
 
-        # Add shared memory barriers.
-        add_shared_memory_barriers(graph)
+            # Add shared memory barriers.
+            add_shared_memory_barriers,
+        ])
+
+        for i, p in enumerate(graph_passes):
+            if p is None:
+                raise RuntimeError(f"Pass {i} is None")
+            try:
+                p(graph)
+            except Exception as e:
+                raise RuntimeError(f"Error in pass: {p.__name__}") from e
+            # print(f"After {p.__name__}:\n{graph}\n")
 
         # Determine grid shape.
         self.grid_type.dims = [1, 1, 1]
@@ -397,6 +438,7 @@ class LaunchableWave(Launchable):
             )
             self.grid_type.dims[dim] *= safe_subs(constraint.count, idxc.subs)
         grid = self.grid_type
+        print(f"After determine grid shape: {grid}")
 
         root_graph = graph.get_root_graph()
         kernel_sig = kernel_codegen.KernelSignature()
@@ -405,12 +447,14 @@ class LaunchableWave(Launchable):
         kernel_sig.add_from_dynamic_symbols(dynamic_symbols)
         kernel_sig.add_grid(self.grid_type)
         kernel_sig.determine_input_output_buffers(root_graph)
+        print(f"After determine kernel sig: {kernel_sig}")
 
         mb = builder.ModuleBuilder(context=context, module_op=module_op)
         entrypoint_name = self._name
         exe = dispatch_codegen.StreamExecutable(mb, name=entrypoint_name)
         workgroup_size = self.hardware_constraints[0].threads_per_block
         subgroup_size = self.hardware_constraints[0].threads_per_wave
+        print("Created module builder")
 
         # Setup LLVM func compilation configs.
         compile_config = kwargs.get("compile_config", {})
@@ -432,15 +476,18 @@ class LaunchableWave(Launchable):
             dynamic_symbols,
             llvm_func_config,
         )
+        print("Done define entrypoint")
 
         emitter = WaveEmitter(
             dispatch_entrypoint, graph, self.constraints, dynamic_symbols
         )
         emitter.emit(graph.get_root_graph())
         emitter.finish()
+        print("Done emit")
 
         if kwargs.get("canonicalize", False):
             canonicalize_module(mb.module_op)
+        print("Done canoncialize")
 
         return mb, graph, exe, kernel_sig, entrypoint_name
 
