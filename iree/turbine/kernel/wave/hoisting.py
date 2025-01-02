@@ -49,10 +49,17 @@ def get_hoistable_ops(
             ):
                 continue
             # Only hoist Read that is loop invariant.
-            if any(
-                ind.start.has(induction_variable) for ind in custom_node.index.values()
-            ):
-                continue
+            index_start = {k: i.start for k, i in custom_node.index.items()}
+            # print(f"Error in hoisting: {custom_node} with index\n{custom_node.index}\n{index_start=}")
+            try:
+                if any(
+                    ind.start.has(induction_variable) for ind in custom_node.index.values()
+                ):
+                    continue
+            except Exception as e:
+                raise RuntimeError(
+                    f"Error in hoisting: {custom_node} with index\n{custom_node.index}\n{index_start=}"
+                ) from e
             hoistable_ops.append(custom_node)
         else:
             continue

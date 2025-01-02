@@ -28,7 +28,7 @@ class RegionGraph:
     @property
     def current_tracer(self) -> "SubgraphTracer":
         return self.tracers[-1]
-
+    
     def create_proxy(self, *args, **kwargs):
         return self.current_tracer.create_proxy(*args, **kwargs)
 
@@ -76,6 +76,13 @@ class RegionGraph:
             out += "\n"
         return out
 
+    def pretty_string(self, root_graph: str) -> str:
+        out = ""
+        for name, subgraph in self.subgraphs.items():
+            if name == root_graph:
+                name = f"{name} [root]"
+            out += f"{name}:\n{subgraph}\n"
+        return out
 
 class SubgraphTracer(fx.Tracer):
     def __init__(

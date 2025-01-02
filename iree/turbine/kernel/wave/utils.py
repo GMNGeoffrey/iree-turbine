@@ -315,6 +315,8 @@ def get_mma_dimensional_mapping(
             k = ((set(lhs_shape) & set(rhs_shape)) - set(acc_shape)).pop()
         except KeyError as e:
             raise RuntimeError(f"{node}:\n{lhs_shape=}\n{rhs_shape=}\n{acc_shape=}\n{custom.lhs=}\n{custom.rhs=}\n{custom.acc=}") from e
+        if lhs_shape[-1] != k or rhs_shape[-1] != k:
+            raise RuntimeError(f"MMA shared dimension must be last {lhs_shape=}\n{rhs_shape=}\n{k=}\n{custom}")
         if custom not in mapping:
             mapping[custom] = {}
         mapping[custom][m] = MMAOperand.M
@@ -512,7 +514,10 @@ def _inplace_invoke(vm_context, device, entry_function, inputs, outputs, dynamic
         else:
             raise ValueError(f"Unsupported dynamic dim type: {type(dynamic_dim)}")
 
-    vm_context.invoke(entry_function, arg_list, ret_list)
+    try:
+        vm_context.invoke(entry_function, arg_list, ret_list)
+    except ValueError as e:
+        raise RuntimeError(f"Error invoking IREE\n{entry_function}\n{arg_list=}\ninputs: {', '.join([str(i.shape) for i in inputs])}\noutputs: {', '.join([str(o.shape) for o in outputs])}") from e
 
 
 def _read_file(name, mode):
@@ -1363,6 +1368,27 @@ def check_is_mapping_contiguous(
     expected_diff[-1] = 1
 
     return diff == expected_diff
+
+
+def sort_indices(indices: dict[IndexExpr, IndexSequence]):
+    """
+    This function takes in indices of a Node, extract their sizes
+    into a list, and then returns the dimension with the largest size.
+    In case of ties, it picks the fastest changing dimension.
+    """
+
+    sorted_values = sorted(
+        [
+            (i, dim, subs_idxc(index.size))
+            for i, (dim, index) in enumerate(indices.items())
+        ],
+        # x[0] is the index of the dimension.
+        # x[2] is the size of the dimension.
+        # We want to sort in descending order, first by size, then by index.
+        # (pick the largest size with the largest index).
+        key=lambda x: (-x[2], -x[0]),
+    )
+    return sorted_values
 
 
 def get_largest_index_and_size(indices: dict[IndexExpr, IndexSequence]):

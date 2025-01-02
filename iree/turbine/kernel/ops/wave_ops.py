@@ -280,7 +280,7 @@ def define_interface_op(op_name: str) -> Callable[[T], T]:
 def get_custom(node: fx.Node) -> "CustomOp":
     """Get the corresponding CustomOp for a given fx.Node."""
     if isinstance(node, CustomOp):
-        print("Careful! You passed a custom op where an fx.Node was required.")
+        raise RuntimeError("Careful! You passed a custom op where an fx.Node was required.")
         return node
     if not isinstance(node, fx.Node):
         raise ValueError(f"Expected an fx.Node but got {type(node)}")
@@ -688,6 +688,13 @@ class BinaryPyOp(CustomOp, ABC):
         if has_same_type:
             self.type = lhs_type
             return
+        # else:
+        #     raise ValueError(
+        #         "BinaryPyOp requires lhs and rhs to have the same type."
+        #         f"\n{self}"
+        #         f"\n{lhs_type}"
+        #         f"\n{rhs_type}"
+        #     )
         lhs_dim_set = set(lhs_type.symbolic_shape)
         rhs_dim_set = set(rhs_type.symbolic_shape)
         if lhs_dim_set.isdisjoint(rhs_dim_set):
@@ -1562,6 +1569,11 @@ class ReduceOp(CustomOp, ABC):
         reduced_dims = [dims for dims in src_type.symbolic_shape if dims != self.dim]
         dst_type = Register[(*reduced_dims, src_type.dtype)]
         self.type = dst_type
+        if self.init is not None and get_custom(self.init).type.symbolic_shape != self.type.symbolic_shape:
+            raise ValueError(
+                f"Init type for {self.tkw_op_name} {get_custom(self.init).type.symbolic_shape} must match reduce type {self.type.symbolic_shape}"
+                f"\n{self}"
+            )
 
     @property
     def num_reduction_dims(self) -> int:

@@ -323,7 +323,7 @@ if __name__ == "__main__":
     parser.add_argument("--thread_ids", nargs="+", type=int, help="Thread ids")
 
     args = parser.parse_args()
-    with open(args.file, "r") as f:
+    with open(args.input, "r") as f:
         asm = f.read()
-    interpreter = Interpreter(parser.workgroup_ids, parser.thread_ids)  # type: ignore
+    interpreter = Interpreter(args.workgroup_ids, args.thread_ids)  # type: ignore
     interpreter.interpret(asm)

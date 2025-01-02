@@ -40,6 +40,7 @@ from .utils import (
     get_inputs,
     get_users,
     get_largest_index_and_size,
+    sort_indices,
 )
 import torch.fx as fx
 import numpy as np
@@ -753,7 +754,10 @@ def set_post_expansion_indices(trace: CapturedTrace, constraints: list[Constrain
             return False
         for dim, scale in custom.expanded_dims.items():
             if dim in custom.index:
-                custom.index[dim].start += scale * custom.vector_shapes[dim]
+                try:
+                    custom.index[dim].start += scale * custom.vector_shapes[dim]
+                except KeyError as e:
+                    raise RuntimeError(f"op index or vector shapes missing expanded dim {dim}:\n{custom.index}\n{custom.vector_shapes}\n{custom}")
         return False
 
     trace.walk(apply_offset)
@@ -806,8 +810,23 @@ def resolve_thread_shapes(trace: CapturedTrace, constraints: list[Constraint]):
         lhs_index = get_index(lhs)
         rhs_index = get_index(rhs)
 
+        # sorted_lhs_index = sort_indices(lhs_index)
+        # sorted_rhs_index = sort_indices(rhs_index)
+
         lhs_dim, lhs_size = get_largest_index_and_size(lhs_index)
         rhs_dim, rhs_size = get_largest_index_and_size(rhs_index)
+
+        # if lhs_dim != rhs_dim:
+        #     rhs_dim_options = set([idx[1] for idx in sorted_rhs_index if idx[2] == rhs_size])
+        #     lhs_dim_options = set([idx[1] for idx in sorted_lhs_index if idx[2] == lhs_size])
+        #     common_dims = lhs_dim_options.intersection(rhs_dim_options)
+        #     for dim in common_dims:
+        #         if dim == lhs_dim:
+        #             rhs_dim = dim
+        #             break
+        #         elif dim == rhs_dim:
+        #             lhs_dim = dim
+        #             break
 
         # If they are equal we are done.
         if lhs_dim == rhs_dim and lhs_size == rhs_size:

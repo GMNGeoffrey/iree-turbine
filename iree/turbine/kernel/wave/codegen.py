@@ -1034,7 +1034,15 @@ def handle_binary_op(op):
             rhs = cast_py_value(emitter, rhs)
 
             if lhs.ir_value.type != rhs.ir_value.type:
-                raise ValidationError(f"Expected lhs and rhs to have same type. Got\n{lhs=}\n{rhs=}")
+                op = get_custom(node)
+                raise ValidationError(
+                    f"Expected lhs and rhs to have same type for\n"
+                    f"{op}\nGot\n"
+                    f"lhs: {lhs.ir_value.type} vs rhs: {rhs.ir_value.type}\n"
+                    f"{lhs=}\n"
+                    f"{rhs=}\n"
+                    f"lhs={get_custom(op.lhs)}\n"
+                    f"rhs={get_custom(op.rhs)}")
 
             lhs = lhs.ir_value
             rhs = rhs.ir_value
@@ -1254,6 +1262,11 @@ def handle_reduction(emitter: WaveEmitter, node: fx.Node):
         flat_ret_values = [
             cast_py_value(emitter, value).ir_value for value in flat_ret_values
         ]
+        if len(flat_ret_values) != len(flat_init_args):
+            raise RuntimeError(f"Loop must have the same number of return values as init args, but got\n"
+                               f"{len(flat_ret_values)} vs {len(flat_init_args)}\n"
+                               f"{flat_ret_values=}\n"
+                               f"{flat_init_args=}\n")
         scf_d.YieldOp(flat_ret_values)
 
     emitter.bind_node_proxies(node, [IRProxyValue(v) for v in forOp.results_])

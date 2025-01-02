@@ -314,8 +314,11 @@ class LaunchableWave(Launchable):
         context: Optional[Context] = None,
         module_op: Optional[Operation] = None,
     ) -> CapturedTrace:
+        compile_config = kwargs.get("compile_config", {})
+        print_ir_after = compile_config.get("print_ir_after", [])
+
         # Trace the function.
-        print("Tracing kernel")
+        print(f"Tracing kernel {self._name}")
         graph = self._trace()
         print("Done tracing")
         print(graph, "\n")
@@ -333,13 +336,13 @@ class LaunchableWave(Launchable):
             self.initialize_symbolic_constraints,
             self.initialize_workgroup_constraints,
         ]
-
         for p in graph_passes:
             try:
                 p(graph)
             except Exception as e:
                 raise RuntimeError(f"Error in pass: {p.__name__}") from e
-            # print(f"After {p.__name__}:\n{graph}\n")
+            if "all" in print_ir_after or p.__name__ in print_ir_after:
+                print(f"After {p.__name__}:\n{graph}\n")
 
         idxc = IndexingContext.current()
         idxc.finalize()
@@ -421,8 +424,10 @@ class LaunchableWave(Launchable):
             try:
                 p(graph)
             except Exception as e:
-                raise RuntimeError(f"Error in pass: {p.__name__}") from e
-            # print(f"After {p.__name__}:\n{graph}\n")
+                print(f"Error in pass: {p.__name__}")
+                raise e
+            if "all" in print_ir_after or p.__name__ in print_ir_after:
+                print(f"After {p.__name__}:\n{graph}\n")
 
         # Determine grid shape.
         self.grid_type.dims = [1, 1, 1]
@@ -457,7 +462,6 @@ class LaunchableWave(Launchable):
         print("Created module builder")
 
         # Setup LLVM func compilation configs.
-        compile_config = kwargs.get("compile_config", {})
         llvm_func_config = {}
         denorm_fp_math_f32 = compile_config.get("denorm_fp_math_f32", None)
         if denorm_fp_math_f32 != None:
