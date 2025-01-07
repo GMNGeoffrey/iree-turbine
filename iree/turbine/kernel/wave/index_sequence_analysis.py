@@ -348,8 +348,9 @@ def verify_nodes(trace: CapturedTrace):
             continue
         if isinstance(custom, (Output, Reduction)):
             continue
-        assert custom.index, f"Index not set for node {custom.fx_node}"
-        assert custom.vector_shapes, f"Vector shapes not set for node {custom.fx_node}"
+        assert custom.index, f"Index not set for node {custom.fx_node}: {custom}"
+        assert custom.vector_shapes, f"Vector shapes not set for node {custom.fx_node}: {custom}"
+        # print("Verified node:", custom.fx_node)
 
 
 def set_node_indices(trace: CapturedTrace, constraints: list[Constraint]):
@@ -869,7 +870,19 @@ def resolve_thread_shapes(trace: CapturedTrace, constraints: list[Constraint]):
 
             if not is_only_missing_dim and not is_innermost_dim:
                 raise NotImplementedError(
-                    "Currently only support resolving discrepancies when the broadcasting dimension is the innermost dimension."
+                    "Currently only support resolving discrepancies when the broadcasting dimension is the innermost dimension.\n"
+                    f"\n{binary_op=}"
+                    f"\n{lhs=}"
+                    f"\n{lhs_index=}"
+                    f"\n{lhs_dim=}"
+                    f"\n{lhs_size=}"
+                    f"\n{lhs.type.symbolic_shape=}"
+                    f"\n{rhs=}"
+                    f"\n{rhs_index=}"
+                    f"\n{rhs_dim=}"
+                    f"\n{rhs_size=}"
+                    f"\n{rhs.type.symbolic_shape=}"
+                    f"\n{broadcast_dim=}"
                 )
 
         # Broadcast

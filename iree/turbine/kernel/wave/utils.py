@@ -504,7 +504,7 @@ def _inplace_invoke(vm_context, device, entry_function, inputs, outputs, dynamic
         else:
             raise ValueError(f"Unsupported input type: {type(input)}")
     for output in outputs:
-        if isinstance(input, torch.Tensor):
+        if isinstance(output, torch.Tensor):
             push_tensor_to_arg_list(output)
         else:
             raise ValueError(f"Unsupported output type: {type(output)}")
@@ -578,6 +578,8 @@ def compile_to_vmfb(
 
     if config.get("print_ir_after_all", False):
         flags.append("--mlir-print-ir-after-all")
+        flags.append("--mlir-print-ir-after-change")
+        flags.append("--mlir-print-local-scope")
 
     preprocessing_pipeline = config.get("iree_preprocessing_pass_pipeline", None)
     if preprocessing_pipeline is not None:
@@ -812,7 +814,8 @@ def get_users(
             return_vals = custom.return_vals[0]
             parent_reduction = custom.graph.parent_op
             if not isinstance(return_vals, (list, tuple)):
-                users.append(next(iter(parent_reduction.users)))
+                if parent_reduction.users:
+                    users.append(next(iter(parent_reduction.users)))
             else:
                 # Handles case where DCE eliminate unused GetResult.
                 get_results = {

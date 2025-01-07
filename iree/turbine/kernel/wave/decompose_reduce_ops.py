@@ -103,7 +103,7 @@ def emit_variable_reduction(
     Does reduction over a singular fx.Node variable.
     """
     init = get_graph_node(Extract(src, [0]), graph)
-    print("Local reduction init shape: ", get_custom(init).type.symbolic_shape)
+    # print("Local reduction init shape: ", get_custom(init).type.symbolic_shape)
     for i in range(1, local_reduction_size):
         cur_slice = get_graph_node(Extract(src, [i]), graph)
         init = get_graph_node(binary_fn(init, cur_slice), graph)
@@ -150,12 +150,12 @@ def emit_scalarized_local_reduction(
     %local_rhs_reduce = vector.reduction<maximumf>, %rhs : f32 from vector<16xf32>
     %local_src_reduce = arith.maximumf %local_lhs_reduce, %local_rhs_reduce : f32
     """
-    print("Reduction src shapes: ", [get_custom(x).type.symbolic_shape for x in reduction_src])
+    # print("Reduction src shapes: ", [get_custom(x).type.symbolic_shape for x in reduction_src])
     locally_reduced_sources = [
         emit_variable_reduction(binary_fn, arg, graph, local_reduction_size)
         for arg in reduction_src
     ]
-    print("Reduced shapes: ", [get_custom(x).type.symbolic_shape for x in locally_reduced_sources])
+    # print("Reduced shapes: ", [get_custom(x).type.symbolic_shape for x in locally_reduced_sources])
     local_reduction = emit_sources_reduction(binary_fn, locally_reduced_sources, graph)
     return local_reduction
 
@@ -247,19 +247,19 @@ def decompose_reduce_ops(
                 # print(f"Decomposing: {arg} with index\n{get_custom(arg).index}")
                 try:
                     op = get_custom(arg)
-                    if op.tkw_op_name == "mma":
-                        index_str = '\n'.join(f"{k}: {v}" for k, v in op.index.items())
-                        lhs_op_name = get_custom(op.lhs).tkw_op_name
-                        rhs_op_name = get_custom(op.rhs).tkw_op_name
-                        acc_op_name = get_custom(op.acc).tkw_op_name
-                        print(f"Decomposing mma with index\n"
-                              f"{index_str}\n"
-                              f"{lhs_op_name=}\n"
-                              f"{rhs_op_name=}\n"
-                              f"{acc_op_name=}\n"
-                              f"{reduction_src=}\n"
-                              f"{reduction_acc=}\n"
-                              f"{reduction_dim=}")
+                    # if op.tkw_op_name == "mma":
+                    #     index_str = '\n'.join(f"{k}: {v}" for k, v in op.index.items())
+                    #     lhs_op_name = get_custom(op.lhs).tkw_op_name
+                    #     rhs_op_name = get_custom(op.rhs).tkw_op_name
+                    #     acc_op_name = get_custom(op.acc).tkw_op_name
+                    #     print(f"Decomposing mma with index\n"
+                    #           f"{index_str}\n"
+                    #           f"{lhs_op_name=}\n"
+                    #           f"{rhs_op_name=}\n"
+                    #           f"{acc_op_name=}\n"
+                    #           f"{reduction_src=}\n"
+                    #           f"{reduction_acc=}\n"
+                    #           f"{reduction_dim=}")
 
                     thread_shape = get_thread_shape(op.index)
                     local_reduce_sizes.append(thread_shape)

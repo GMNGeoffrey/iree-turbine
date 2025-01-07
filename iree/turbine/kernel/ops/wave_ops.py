@@ -475,7 +475,7 @@ class CustomOp(ABC):
         self.graph.erase_node(self.fx_node)
 
     @classmethod
-    def handle(cls, graph, *args, **kwargs) -> fx.Node:
+    def handle(cls, graph: RegionGraph, *args, **kwargs) -> fx.Node:
         node = cls(*args, **kwargs)
         node._add_proxy_to_graph(graph)
         node.fx_node.node.tkw_op = cls
@@ -1143,7 +1143,9 @@ class Reduction(CustomOp):
     implicit_captures: Sequence[fx.Proxy]
 
     @classmethod
-    def handle(cls, graph, *args, **kwargs):
+    def handle(cls, graph: RegionGraph, *args, **kwargs):
+        if not isinstance(graph, RegionGraph):
+            raise TypeError("handle should be passed RegionGraph")
         def wrapper(f):
             with graph.subtracer() as subtracer:
                 subgraph_name, implicit_captures = subtracer.trace(f)
@@ -1190,7 +1192,7 @@ class Reduction(CustomOp):
         expand_dims: list[IndexSymbol] = []
         return_node = [
             nested_node
-            for nested_node in self.graph.subgraphs[self.subgraph_name].nodes
+            for nested_node in self.get_root_graph().subgraphs[self.subgraph_name].nodes
             if isinstance(get_custom(nested_node), Output)
         ]
         assert len(return_node) == 1
@@ -1393,12 +1395,13 @@ class GetResult(CustomOp):
     res_idx: int
 
     def infer_type(self):
-        src_type = get_custom(self.value).type
+        op = get_custom(self.value)
+        src_type = op.type
         if isinstance(src_type, list):
             try:
                 self.type = src_type[self.res_idx]
             except Exception as e:
-                raise ValueError(f"{self.res_idx=}\n{self.value=}\n{src_type=}") from e
+                raise ValueError(f"{op=}\n{self.res_idx=}\n{self.value=}\n{src_type=}") from e
         else:
             self.type = src_type
 

@@ -251,10 +251,10 @@ class KernelSignature:
         # Extract all placeholder nodes.
         placeholder_nodes = filter_fx_graph(graph, is_placeholder)
 
-        def only_read_dependencies(node):
-            return all([isinstance(get_custom(x), Read) for x in node.users.keys()])
+        # def only_read_dependencies(node):
+        #     return all([isinstance(get_custom(x), Read) for x in node.users.keys()])
 
-        def only_write_dependencies(node):
+        def has_write_dependencies(node):
             if len(node.users) == 0:
                 return False
             return all([isinstance(get_custom(x), Write) for x in node.users.keys()])
@@ -269,12 +269,17 @@ class KernelSignature:
                 continue
 
             # TODO: Match KernelBufferUsage to what bufferType that is expected on IREE.
-            usage = KernelBufferUsage.INPUT
-            if only_read_dependencies(node):
-                usage = KernelBufferUsage.INPUT
+            # INPUT nodes are marked read-only which doesn't work if they're both read from and written to.
+            # Can't see reads within reductions
+            # usage = KernelBufferUsage.INPUT
+            # if has_write_dependencies(node):
 
-            if only_write_dependencies(node):
-                usage = KernelBufferUsage.OUTPUT
+            usage = KernelBufferUsage.OUTPUT
+            # elif only_read_dependencies(node):
+            #     usage = KernelBufferUsage.INPUT
+            # else:
+            #     # This is overly aggressive, but helpful right now
+            #     raise RuntimeError(f"Argument {node} is neither read from nor written to. Users\n:{node.users}")
 
             # Create new Memory type with the correct usage
             memory_type = self.bindings[index].kernel_buffer_type
@@ -293,7 +298,12 @@ class KernelSignature:
         for b in self.bindings:
             part = repr(b.reference)
             if b.name:
-                part = f"{b.name}: {part}"
+                part = f"{b.name}: {part} {b.binding_type.name}"
+            if b.binding_type == BindingType.KERNEL_BUFFER:
+                part += f" ({b.kernel_buffer_type.usage.name} {b.kernel_buffer_type})"
+            if b.binding_type == BindingType.SYMBOL_VALUE:
+                part += f" ({b.symbol_type})"
+            
             parts.append(part)
         return f"Signature({', '.join(parts)})"
 

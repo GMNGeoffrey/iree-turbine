@@ -313,22 +313,22 @@ class LaunchableWave(Launchable):
         kwargs,
         context: Optional[Context] = None,
         module_op: Optional[Operation] = None,
-    ) -> CapturedTrace:
+    ) -> tuple[builder.ModuleBuilder, CapturedTrace, dispatch_codegen.StreamExecutable, kernel_codegen.KernelSignature, str]:
         compile_config = kwargs.get("compile_config", {})
         print_ir_after = compile_config.get("print_ir_after", [])
 
         # Trace the function.
         print(f"Tracing kernel {self._name}")
         graph = self._trace()
-        print("Done tracing")
-        print(graph, "\n")
+        if "all" in print_ir_after or "trace" in print_ir_after or "first" in print_ir_after:
+            print(f"After trace:\n{graph}\n")
 
         initialize_iter_args(graph)
         self.create_induction_vars(graph)
-        print("Done create_induction_vars")
-        for k, v in self.induction_vars.items():
-            print(f"{k}: {v}")
-        print()
+        #print("Done create_induction_vars")
+        # for k, v in self.induction_vars.items():
+            #print(f"{k}: {v}")
+        #print()
 
         graph_passes = [
             self.initialize_wave_constraints,
@@ -346,11 +346,11 @@ class LaunchableWave(Launchable):
 
         idxc = IndexingContext.current()
         idxc.finalize()
-        print(f"After finalize indexing context: {idxc}")
+        #print(f"After finalize indexing context: {idxc}")
 
         # Initialize Vector shapes
         self.hardware_constraints[0].subs_vector_shapes(idxc.subs)
-        print(f"Ater {self.hardware_constraints[0].subs_vector_shapes.__name__}: {self.hardware_constraints[0].vector_shapes}")
+        #print(f"Ater {self.hardware_constraints[0].subs_vector_shapes.__name__}: {self.hardware_constraints[0].vector_shapes}")
 
         class CurryConstraints:
             def __init__(self, graph_tform: Callable[[CapturedTrace, list[Constraint]], None], constraints: list[Constraint]):
@@ -429,6 +429,9 @@ class LaunchableWave(Launchable):
             if "all" in print_ir_after or p.__name__ in print_ir_after:
                 print(f"After {p.__name__}:\n{graph}\n")
 
+        if "all" in print_ir_after or "last" in print_ir_after:
+            print(f"After final pass:\n{graph}\n")
+
         # Determine grid shape.
         self.grid_type.dims = [1, 1, 1]
         max_workgroup_dim = 2
@@ -459,7 +462,7 @@ class LaunchableWave(Launchable):
         exe = dispatch_codegen.StreamExecutable(mb, name=entrypoint_name)
         workgroup_size = self.hardware_constraints[0].threads_per_block
         subgroup_size = self.hardware_constraints[0].threads_per_wave
-        print("Created module builder")
+        #print("Created module builder")
 
         # Setup LLVM func compilation configs.
         llvm_func_config = {}
@@ -480,18 +483,18 @@ class LaunchableWave(Launchable):
             dynamic_symbols,
             llvm_func_config,
         )
-        print("Done define entrypoint")
+        #print("Done define entrypoint")
 
         emitter = WaveEmitter(
             dispatch_entrypoint, graph, self.constraints, dynamic_symbols
         )
         emitter.emit(graph.get_root_graph())
         emitter.finish()
-        print("Done emit")
+        #print("Done emit")
 
         if kwargs.get("canonicalize", False):
             canonicalize_module(mb.module_op)
-        print("Done canoncialize")
+        #print("Done canoncialize")
 
         return mb, graph, exe, kernel_sig, entrypoint_name
 
