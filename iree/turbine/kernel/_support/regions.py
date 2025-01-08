@@ -15,6 +15,17 @@ import torch.fx as fx
 import torch.utils._pytree as pytree
 
 
+def graph_pretty_string(graph: fx.Graph):
+    graph_str = str(graph)
+    graph_str = graph_str.replace(
+        "iree.turbine.kernel.lang.kernel_buffer.KernelBufferMeta.new_subtype.<locals>.SubType",
+        "",
+    )
+    graph_str = graph_str.replace("target=iree.turbine.kernel.ops.wave_ops.", "")
+    graph_str = graph_str.replace("call_function", "")
+    return graph_str
+
+
 class RegionGraph:
     def __init__(self):
         self.tracers: List["SubgraphTracer"] = []
@@ -81,7 +92,7 @@ class RegionGraph:
         for name, subgraph in self.subgraphs.items():
             if name == root_graph:
                 name = f"{name} [root]"
-            out += f"{name}:\n{subgraph}\n"
+            out += f"{name}:\n{graph_pretty_string(subgraph)}\n"
         return out
 
 class SubgraphTracer(fx.Tracer):

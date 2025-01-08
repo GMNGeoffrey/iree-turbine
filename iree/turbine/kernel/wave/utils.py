@@ -848,8 +848,11 @@ def get_inputs(
         iter_arg_idx = custom.iter_idx
         inputs.append(local_reduction.init_args[iter_arg_idx])
     elif isinstance(custom, GetResult):
+        if custom.value is None:
+            print(f"GetResult node {custom} has no value\n{node.args=}\n{custom.graph}")
+        assert custom.value is not None, f"GetResult node {custom} has no value"
         reduction = get_custom(custom.value)
-        assert isinstance(reduction, Reduction), "GetResult must be used by a Reduction"
+        assert isinstance(reduction, Reduction), f"GetResult must be using a Reduction, but\n{custom}\nis using\n{reduction}"
         # Map get result to output
         reduction_subgraph = reduction.graph.subgraphs[reduction.subgraph_name]
         if len(reduction.init_args) == 1:
@@ -1413,21 +1416,6 @@ def get_largest_index_and_size(indices: dict[IndexExpr, IndexSequence]):
         key=lambda x: (-x[2], -x[0]),
     )
     return sorted_values[0][1:]
-
-
-def print_graph(graph: fx.Graph):
-    """
-    Pretty-print the graph containing this node.
-    """
-    graph_str = str(graph)
-    graph_str = graph_str.replace(
-        "iree.turbine.kernel.lang.kernel_buffer.KernelBufferMeta.new_subtype.<locals>.SubType",
-        "",
-    )
-    graph_str = graph_str.replace("target=iree.turbine.kernel.ops.wave_ops.", "")
-    graph_str = graph_str.replace("call_function", "")
-    print(graph_str)
-
 
 def initialize_iter_args(trace: CapturedTrace) -> None:
     """

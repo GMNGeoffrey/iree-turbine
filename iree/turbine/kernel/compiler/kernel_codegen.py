@@ -254,10 +254,10 @@ class KernelSignature:
         # def only_read_dependencies(node):
         #     return all([isinstance(get_custom(x), Read) for x in node.users.keys()])
 
-        def has_write_dependencies(node):
-            if len(node.users) == 0:
-                return False
-            return all([isinstance(get_custom(x), Write) for x in node.users.keys()])
+        # def has_write_dependencies(node):
+        #     if len(node.users) == 0:
+        #         return False
+        #     return all([isinstance(get_custom(x), Write) for x in node.users.keys()])
 
         for node in placeholder_nodes:
             index = None
@@ -270,16 +270,13 @@ class KernelSignature:
 
             # TODO: Match KernelBufferUsage to what bufferType that is expected on IREE.
             # INPUT nodes are marked read-only which doesn't work if they're both read from and written to.
-            # Can't see reads within reductions
+            # Can't see reads within reductions. Give up and mark everything as an output
             # usage = KernelBufferUsage.INPUT
             # if has_write_dependencies(node):
 
             usage = KernelBufferUsage.OUTPUT
             # elif only_read_dependencies(node):
             #     usage = KernelBufferUsage.INPUT
-            # else:
-            #     # This is overly aggressive, but helpful right now
-            #     raise RuntimeError(f"Argument {node} is neither read from nor written to. Users\n:{node.users}")
 
             # Create new Memory type with the correct usage
             memory_type = self.bindings[index].kernel_buffer_type

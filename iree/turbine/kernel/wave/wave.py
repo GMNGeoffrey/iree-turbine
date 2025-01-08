@@ -316,33 +316,32 @@ class LaunchableWave(Launchable):
     ) -> tuple[builder.ModuleBuilder, CapturedTrace, dispatch_codegen.StreamExecutable, kernel_codegen.KernelSignature, str]:
         compile_config = kwargs.get("compile_config", {})
         print_ir_after = compile_config.get("print_ir_after", [])
+        print_ir_before = compile_config.get("print_ir_before", [])
 
         # Trace the function.
-        print(f"Tracing kernel {self._name}")
-        graph = self._trace()
-        if "all" in print_ir_after or "trace" in print_ir_after or "first" in print_ir_after:
-            print(f"After trace:\n{graph}\n")
+        # print(f"Tracing kernel {self._name}")
+        trace = self._trace()
+        if "all" in print_ir_after or "all" in print_ir_before or "trace" in print_ir_after or "first" in print_ir_before:
+            print(f"After trace/Before first pass:\n{trace}\n")
 
-        initialize_iter_args(graph)
-        self.create_induction_vars(graph)
-        #print("Done create_induction_vars")
-        # for k, v in self.induction_vars.items():
-            #print(f"{k}: {v}")
-        #print()
 
         graph_passes = [
+            initialize_iter_args,
+            self.create_induction_vars,
             self.initialize_wave_constraints,
             self.initialize_reductions,
             self.initialize_symbolic_constraints,
             self.initialize_workgroup_constraints,
         ]
         for p in graph_passes:
+            if "all" in print_ir_before or p.__name__ in print_ir_before:
+                print(f"Before {p.__name__}:\n{trace}\n")
             try:
-                p(graph)
+                p(trace)
             except Exception as e:
                 raise RuntimeError(f"Error in pass: {p.__name__}") from e
             if "all" in print_ir_after or p.__name__ in print_ir_after:
-                print(f"After {p.__name__}:\n{graph}\n")
+                print(f"After {p.__name__}:\n{trace}\n")
 
         idxc = IndexingContext.current()
         idxc.finalize()
@@ -419,18 +418,19 @@ class LaunchableWave(Launchable):
         ])
 
         for i, p in enumerate(graph_passes):
-            if p is None:
-                raise RuntimeError(f"Pass {i} is None")
+            if "all" in print_ir_before or p.__name__ in print_ir_before:
+                print(f"Before {p.__name__}:\n{trace}\n")
             try:
-                p(graph)
+                p(trace)
             except Exception as e:
                 print(f"Error in pass: {p.__name__}")
                 raise e
             if "all" in print_ir_after or p.__name__ in print_ir_after:
-                print(f"After {p.__name__}:\n{graph}\n")
+                print(f"After {p.__name__}:\n{trace}\n")
 
         if "all" in print_ir_after or "last" in print_ir_after:
-            print(f"After final pass:\n{graph}\n")
+            # Take advantage of Python leaking loop variables
+            print(f"After final pass {p.__name__}:\n{trace}\n")
 
         # Determine grid shape.
         self.grid_type.dims = [1, 1, 1]
@@ -446,16 +446,17 @@ class LaunchableWave(Launchable):
             )
             self.grid_type.dims[dim] *= safe_subs(constraint.count, idxc.subs)
         grid = self.grid_type
-        print(f"After determine grid shape: {grid}")
+        # print(f"After determine grid shape: {grid}")
 
-        root_graph = graph.get_root_graph()
+        root_graph = trace.get_root_graph()
         kernel_sig = kernel_codegen.KernelSignature()
         kernel_sig.add_from_graph_placeholders(root_graph)
         dynamic_symbols = kwargs.get("dynamic_symbols", [])
         kernel_sig.add_from_dynamic_symbols(dynamic_symbols)
         kernel_sig.add_grid(self.grid_type)
         kernel_sig.determine_input_output_buffers(root_graph)
-        print(f"After determine kernel sig: {kernel_sig}")
+        if compile_config.get("print_signature", False):
+            print(f"Kernel signature: {kernel_sig}")
 
         mb = builder.ModuleBuilder(context=context, module_op=module_op)
         entrypoint_name = self._name
@@ -486,9 +487,9 @@ class LaunchableWave(Launchable):
         #print("Done define entrypoint")
 
         emitter = WaveEmitter(
-            dispatch_entrypoint, graph, self.constraints, dynamic_symbols
+            dispatch_entrypoint, trace, self.constraints, dynamic_symbols
         )
-        emitter.emit(graph.get_root_graph())
+        emitter.emit(trace.get_root_graph())
         emitter.finish()
         #print("Done emit")
 
@@ -496,7 +497,7 @@ class LaunchableWave(Launchable):
             canonicalize_module(mb.module_op)
         #print("Done canoncialize")
 
-        return mb, graph, exe, kernel_sig, entrypoint_name
+        return mb, trace, exe, kernel_sig, entrypoint_name
 
     def test_execute(self, args, kwargs):
         run = kwargs.get("run", False)

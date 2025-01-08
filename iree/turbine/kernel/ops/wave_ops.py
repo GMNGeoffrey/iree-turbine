@@ -280,7 +280,7 @@ def define_interface_op(op_name: str) -> Callable[[T], T]:
 def get_custom(node: fx.Node) -> "CustomOp":
     """Get the corresponding CustomOp for a given fx.Node."""
     if isinstance(node, CustomOp):
-        raise RuntimeError("Careful! You passed a custom op where an fx.Node was required.")
+        raise ValueError("Careful! You passed a custom op where an fx.Node was required.")
         return node
     if not isinstance(node, fx.Node):
         raise ValueError(f"Expected an fx.Node but got {type(node)}")
@@ -338,8 +338,8 @@ class CustomOp(ABC):
         return self.custom_string({})
 
     def custom_string(self, value_map: dict[str, str]) -> str:
-        # print all variables of the node apart from graph and fx_node
-        ignore_list = ["fx_node", "graph"]
+        # print all variables of the node apart from graph
+        ignore_list = ["graph"]
         vars_list = [
             f"{key}={value}"
             for key, value in vars(self).items()
@@ -1254,7 +1254,7 @@ class Reduction(CustomOp):
                         for val in return_vals
                     ]
                     if isinstance(return_vals, (Sequence))
-                    else return_vals.index
+                    else [return_vals.index]
                 )
 
     @index.setter
@@ -1394,6 +1394,11 @@ class GetResult(CustomOp):
     value: fx.Node
     res_idx: int
 
+    # def __post_init__(self):
+    #     super().__post_init__()
+    #     assert self.value is not None, f"GetResult node {self} instantiated without a value"
+    #     assert isinstance(get_custom(self.value), Reduction), f"GetResult node {self} instantiated with non-reduction value {self.value}\n{get_custom(self.value)}"
+
     def infer_type(self):
         op = get_custom(self.value)
         src_type = op.type
@@ -1425,11 +1430,11 @@ class GetResult(CustomOp):
         if custom_index is None:
             return None
         if not isinstance(custom, Reduction):
-            return custom.index
+            return custom_index
         assert isinstance(custom_index, Sequence) and self.res_idx < len(
             custom.indexing_dims
-        )
-        return custom.index[self.res_idx]
+        ), f"Invalid {custom_index=} with {self.res_idx=} and {custom.indexing_dims=}\n{custom}"
+        return custom_index[self.res_idx]
 
     @index.setter
     def index(self, value: dict[IndexSymbol, IndexSequence]):

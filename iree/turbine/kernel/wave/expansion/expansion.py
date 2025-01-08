@@ -687,5 +687,6 @@ def expand_graph(
     # Fixup all mma nodes.
     fixup_mma_nodes(trace, expansion_context)
     # Remove original nodes in root graph.
+    # print(f"Before remove orig:\n{trace}")
     remove_original_nodes(leaf_nodes)
     remove_unused_registers(trace)

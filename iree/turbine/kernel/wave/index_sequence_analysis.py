@@ -339,6 +339,7 @@ def verify_nodes(trace: CapturedTrace):
     """
     Verify that all the valid nodes have their index and vector shapes set.
     """
+    # print(trace)
     nodes = trace.walk(lambda x: x)
     for node in nodes:
         custom = get_custom(node)
@@ -350,7 +351,8 @@ def verify_nodes(trace: CapturedTrace):
             continue
         assert custom.index, f"Index not set for node {custom.fx_node}: {custom}"
         assert custom.vector_shapes, f"Vector shapes not set for node {custom.fx_node}: {custom}"
-        # print("Verified node:", custom.fx_node)
+        batchless_index = {k: v for k, v in custom.index.items() if str(k) != "B"}
+        # print(f"Verified node: {custom.fx_node}: {batchless_index}")
 
 
 def set_node_indices(trace: CapturedTrace, constraints: list[Constraint]):
