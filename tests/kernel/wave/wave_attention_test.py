@@ -1171,14 +1171,19 @@ def get_attention_bwd_kernel(
     i = tkw.IndexMapping.iterator(0)
     j = tkw.IndexMapping.iterator(1)
     k = tkw.IndexMapping.iterator(2)
-    flip_k2_m_mapping = tkw.IndexMapping(
+    flip_k2_m_write_mapping = tkw.IndexMapping(
         num_iterators=3, inputs={B: i, K2_kvs: j, M_qs: k}, outputs={B: i, M_qs: k, K2_kvs: j}
     )
-    flip_n_m_mapping = tkw.IndexMapping(
+    flip_n_m_write_mapping = tkw.IndexMapping(
         num_iterators=3, inputs={B: i, N_vd: k, M_qs: j}, outputs={B: i, M_qs: j, N_vd: k}
     )
 
-    # p_reload_mapping = tkw.IndexMapping(num_iterators=3, inputs={B: i, K2_kvs: j, M_qs
+    flip_m_k1_read_mapping = tkw.IndexMapping(
+        num_iterators=3, inputs={B: i, M_qs: k, K1_qkd: j}, outputs={B: i, K1_qkd: j, M_qs: k},
+    )
+    flip_m_k2_read_mapping = tkw.IndexMapping(
+        num_iterators=3, inputs={B: i, M_qs: k, K2_kvs: j}, outputs={B: i, K2_kvs: j, M_qs: k},
+    )
 
     @tkw.wave(constraints)
     def attention_bwd(
@@ -1190,7 +1195,7 @@ def get_attention_bwd_kernel(
         lse: tkl.Memory[B, K2_kvs, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         D: tkl.Memory[B, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         # dq: tkl.Memory[B, M_qs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        # dk: tkl.Memory[B, K2_kvs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        dk: tkl.Memory[B, K2_kvs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         dv: tkl.Memory[B, K2_kvs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         s: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
         p: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
@@ -1202,18 +1207,19 @@ def get_attention_bwd_kernel(
     ):
 
         dv_init = tkl.Register[B, K2_kvs, N_vd, tkl.f32](0.0)
-        # dk_init = tkl.Register[B, K2_kvs, K1_qkd, tkl.f32](0.0)
+        dk_init = tkl.Register[B, K2_kvs, K1_qkd, tkl.f32](0.0)
 
         @tkw.reduction(M_qs, init_args=[
             dv_init,
-            # dk_init,
+            dk_init,
         ])
         def loop_q_seq_len(
             dv_prev: tkl.Register[B, K2_kvs, N_vd, tkl.f32],
-            # dk_prev: tkl.Register[B, K2_kvs, K1_qkd, tkl.f32],
-        ) -> tkl.Register[B, K2_kvs, N_vd, tkl.f32]:
-        #     # tkl.Register[B, K2_kvs, K1_qkd, tkl.f32],
-        # :
+            dk_prev: tkl.Register[B, K2_kvs, K1_qkd, tkl.f32],
+        ) -> tuple[
+            tkl.Register[B, K2_kvs, N_vd, tkl.f32],
+            tkl.Register[B, K2_kvs, K1_qkd, tkl.f32],
+        ]:
             k_j = tkw.read(k, elements_per_thread=LOAD_ELEMS_PER_THREAD)  # B x K2 x K1
             q_i = tkw.read(q, elements_per_thread=LOAD_ELEMS_PER_THREAD)  # B x M  x K1
 
@@ -1226,14 +1232,14 @@ def get_attention_bwd_kernel(
             s_ij = tkw.permute(s_ij, [B, K2_kvs, M_qs])
             lse_i = tkw.read(lse, elements_per_thread=LOAD_ELEMS_PER_THREAD)
             p_ij = tkw.exp2(log2e * (tkw.cast(s_ij, tkl.f16) - lse_i))
-            tkw.write(p_ij, p, mapping=flip_k2_m_mapping, elements_per_thread=STORE_ELEMS_PER_THREAD)
+            tkw.write(p_ij, p, mapping=flip_k2_m_write_mapping, elements_per_thread=STORE_ELEMS_PER_THREAD)
 
             do_i_for_dv = tkw.read(do, elements_per_thread=LOAD_ELEMS_PER_THREAD)  # B x M  x N
             dv_j = tkw.mma(p_ij, do_i_for_dv, dv_prev)  # B x M x K2 @ B x M x N -> B x
             
             v_j = tkw.read(v, elements_per_thread=LOAD_ELEMS_PER_THREAD)  # B x K2 x N
             # This has to be loaded separately so N is the fastest-varying dimension
-            do_i_for_dp = tkw.read(do, mapping=flip_n_m_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            do_i_for_dp = tkw.read(do, mapping=flip_n_m_write_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
             dp_acc = tkl.Register[B, K2_kvs, M_qs, tkl.f32](0.0)  # B x M  x K2
             dp_ij = tkw.mma(v_j, do_i_for_dp, dp_acc)  # B x M x K2
             dp_ij = tkw.permute(dp_ij, [B, M_qs, K2_kvs])
@@ -1255,9 +1261,10 @@ def get_attention_bwd_kernel(
             p_ij_for_ds = tkw.read(p, elements_per_thread=LOAD_ELEMS_PER_THREAD)
             ds_ij = p_ij_for_ds * dp_ij_sub  # B x M  x K2
             tkw.write(ds_ij, ds, elements_per_thread=STORE_ELEMS_PER_THREAD)
-            # dk_j = tkw.mma(
-            #     tkw.permute(ds_ij, [B, K2_kvs, M_qs]), tkw.permute(q_i, [B, K1_qkd, M_qs]), dk_prev
-            # )
+
+            ds_ij_for_dk = tkw.read(ds, mapping=flip_m_k2_read_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            q_i_for_dk = tkw.read(q, mapping=flip_m_k1_read_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            dk_j = tkw.mma(ds_ij_for_dk, q_i_for_dk, dk_prev)
             # dq_prev = tkw.read(
             #     dq, elements_per_thread=LOAD_ELEMS_PER_THREAD
             # )  # B x M  x K1
@@ -1265,18 +1272,18 @@ def get_attention_bwd_kernel(
             #     ds_ij, tkw.permute(k_j, [B, K1_qkd, K2_kvs]), tkw.cast(dq_prev, tkl.f32)
             # )  # B x M  x K1
             # tkw.write(dq_i, dq, elements_per_thread=STORE_ELEMS_PER_THREAD)
-            return dv_j #, dk_j
+            return dv_j, dk_j
 
         (
-            dv_j
-            # dk_j,
+            dv_j,
+            dk_j,
         ) = loop_q_seq_len
         tkw.write(
             tkw.cast(dv_j, tkl.f16), dv, elements_per_thread=STORE_ELEMS_PER_THREAD
         )
-        # tkw.write(
-        #     tkw.cast(dk_j, tkl.f16), dk, elements_per_thread=STORE_ELEMS_PER_THREAD
-        # )
+        tkw.write(
+            tkw.cast(dk_j, tkl.f16), dk, elements_per_thread=STORE_ELEMS_PER_THREAD
+        )
 
     hyperparams = {
         ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
@@ -1827,7 +1834,7 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
             expanded_lse.transpose(-1, -2),
             D,
             # dq,
-            # dk,
+            dk,
             dv,
             s,
             # s_minus_l,
