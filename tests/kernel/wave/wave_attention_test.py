@@ -1240,7 +1240,8 @@ def get_attention_bwd_kernel(
             D_i = tkw.read(D, elements_per_thread=1)  # B x M
             dp_ij_sub = tkw.cast(dp_ij, tkl.f16) - tkw.broadcast(D_i, [B, M_qs, K2_kvs])
             tkw.write(dp_ij_sub, dp_sub, elements_per_thread=STORE_ELEMS_PER_THREAD)
-            # ds_ij = p_ij * dp_ij_sub  # B x M  x K2
+            dp_ij_sub_for_ds = tkw.read(dp_ij_sub, dp_sub, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            ds_ij = p_ij * dp_ij_sub_for_ds  # B x M  x K2
             # tkw.write(ds_ij, ds, elements_per_thread=STORE_ELEMS_PER_THREAD)
             # dk_j = tkw.mma(
             #     tkw.permute(ds_ij, [B, K2_kvs, M_qs]), tkw.permute(q_i, [B, K1_qkd, M_qs]), dk_prev
