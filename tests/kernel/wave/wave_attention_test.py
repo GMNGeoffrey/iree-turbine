@@ -1194,9 +1194,11 @@ def get_attention_bwd_kernel(
         dv: tkl.Memory[B, K2_kvs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         s: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
         p: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        # ds: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        ds: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         dp: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
         dp_sub: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # dp_sub_ref: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # p_ref: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
     ):
 
         dv_init = tkl.Register[B, K2_kvs, N_vd, tkl.f32](0.0)
@@ -1240,9 +1242,19 @@ def get_attention_bwd_kernel(
             D_i = tkw.read(D, elements_per_thread=1)  # B x M
             dp_ij_sub = tkw.cast(dp_ij, tkl.f16) - tkw.broadcast(D_i, [B, M_qs, K2_kvs])
             tkw.write(dp_ij_sub, dp_sub, elements_per_thread=STORE_ELEMS_PER_THREAD)
-            dp_ij_sub_for_ds = tkw.read(dp_ij_sub, dp_sub, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-            ds_ij = p_ij * dp_ij_sub_for_ds  # B x M  x K2
-            # tkw.write(ds_ij, ds, elements_per_thread=STORE_ELEMS_PER_THREAD)
+            
+            # Just multiplying p_ij * dp_ij_sub breaks the previously calculated
+            # dp. Trying to write dp_sub and then read it back again just
+            # results in ds being mostly zero (race condition?). Trying to pass
+            # in the reference dp_sub doesn't fix it though. It actually looks
+            # like it's just really bad numerics maybe?
+            # But loading back p works, so probably this is another shape/layout thing I don't understand.
+            # dp_ij_sub_for_ds = dp_ij_sub # tkw.read(dp_sub_ref, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            
+            # We have to read this back again :-(
+            p_ij_for_ds = tkw.read(p, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            ds_ij = p_ij_for_ds * dp_ij_sub  # B x M  x K2
+            tkw.write(ds_ij, ds, elements_per_thread=STORE_ELEMS_PER_THREAD)
             # dk_j = tkw.mma(
             #     tkw.permute(ds_ij, [B, K2_kvs, M_qs]), tkw.permute(q_i, [B, K1_qkd, M_qs]), dk_prev
             # )
@@ -1793,6 +1805,8 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         assert_close(v, v_orig.to(torch.float16))
         assert_close(do, do_orig.to(torch.float16))
 
+        dp_sub_ref = (dp_ref - D.reshape((batch, q_seq_len, 1))).to(torch.float16)
+
         dq = torch.zeros_like(q)
         dk = torch.zeros_like(k)
         dv = torch.zeros_like(v)
@@ -1818,9 +1832,11 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
             s,
             # s_minus_l,
             p,
-            # ds,
+            ds,
             dp,
             dp_sub,
+            # dp_sub_ref,
+            # p_ref,
         )
             
         if test_dump_generated_mlir:
@@ -1863,9 +1879,15 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         assert_close(dv, dv_ref, atol=5e-2, rtol=1e-2)
 
         assert_close(dp, dp_ref, atol=5e-2, rtol=1e-2)
-        dp_sub_ref = (dp_ref - D.reshape((batch, q_seq_len, 1))).to(torch.float16)
         assert_close(dp_sub, dp_sub_ref, atol=5e-2, rtol=1e-2)
+
+        assert_close(ds_ref, p_ref*dp_sub_ref, atol=5e-2, rtol=1e-2) # I don't actually understand why this works
+        
+        # print_small_tensor(ds_ref, "ds_ref")
+        # print_small_tensor(ds, "ds")
+
         assert_close(ds, ds_ref, atol=5e-2, rtol=1e-2)
+        assert_close(dk, dk_ref, atol=5e-2, rtol=1e-2)
 
         # print_small_tensor(s, "s")
         # print_small_tensor(p, "p")
@@ -1880,7 +1902,6 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         # # print_small_tensor(dv, "dv")
 
         assert_close(dq, dq_ref, atol=5e-2, rtol=1e-2)
-        assert_close(dk, dk_ref, atol=5e-2, rtol=1e-2)
 
 
 @require_e2e
