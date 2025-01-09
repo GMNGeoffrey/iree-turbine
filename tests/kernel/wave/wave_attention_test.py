@@ -1171,8 +1171,11 @@ def get_attention_bwd_kernel(
     i = tkw.IndexMapping.iterator(0)
     j = tkw.IndexMapping.iterator(1)
     k = tkw.IndexMapping.iterator(2)
-    flip_seqs_mapping = tkw.IndexMapping(
+    flip_k2_m_mapping = tkw.IndexMapping(
         num_iterators=3, inputs={B: i, K2_kvs: j, M_qs: k}, outputs={B: i, M_qs: k, K2_kvs: j}
+    )
+    flip_n_m_mapping = tkw.IndexMapping(
+        num_iterators=3, inputs={B: i, M_qs: j, N_vd: k}, outputs={B: i, N_vd: k, M_qs: j}
     )
 
     # p_reload_mapping = tkw.IndexMapping(num_iterators=3, inputs={B: i, K2_kvs: j, M_qs
@@ -1181,7 +1184,7 @@ def get_attention_bwd_kernel(
     def attention_bwd(
         q: tkl.Memory[B, M_qs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         k: tkl.Memory[B, K2_kvs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        # v: tkl.Memory[B, K2_kvs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        v: tkl.Memory[B, K2_kvs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         do: tkl.Memory[B, N_vd, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         # This has to be loaded in this way or set_node_indices fails with resolving thread shapes
         lse: tkl.Memory[B, K2_kvs, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
@@ -1192,7 +1195,7 @@ def get_attention_bwd_kernel(
         s: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
         p: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         # ds: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        # dp: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
+        dp: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
         # dp_sub: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
     ):
 
@@ -1210,7 +1213,6 @@ def get_attention_bwd_kernel(
         #     # tkl.Register[B, K2_kvs, K1_qkd, tkl.f32],
         # :
             k_j = tkw.read(k, elements_per_thread=LOAD_ELEMS_PER_THREAD)  # B x K2 x K1
-            # v_j = tkw.read(v, elements_per_thread=LOAD_ELEMS_PER_THREAD)  # B x K2 x N
             q_i = tkw.read(q, elements_per_thread=LOAD_ELEMS_PER_THREAD)  # B x M  x K1
 
             s_acc = tkl.Register[B, M_qs, K2_kvs, tkl.f32](0.0)  # B x K2 x M
@@ -1222,17 +1224,17 @@ def get_attention_bwd_kernel(
             s_ij = tkw.permute(s_ij, [B, K2_kvs, M_qs])
             lse_i = tkw.read(lse, elements_per_thread=LOAD_ELEMS_PER_THREAD)
             p_ij = tkw.exp2(log2e * (tkw.cast(s_ij, tkl.f16) - lse_i))
-            tkw.write(p_ij, p, mapping=flip_seqs_mapping, elements_per_thread=STORE_ELEMS_PER_THREAD)
+            tkw.write(p_ij, p, mapping=flip_k2_m_mapping, elements_per_thread=STORE_ELEMS_PER_THREAD)
 
-            do_i = tkw.read(do, elements_per_thread=LOAD_ELEMS_PER_THREAD)  # B x M  x N
-            # dp_acc = tkl.Register[B, K2_kvs, M_qs, tkl.f32](0.0)  # B x M  x K2
-            # dp_ij = tkw.mma(v_j, do_i, dp_acc)  # B x M x K2
-            # dp_ij = tkw.permute(dp_ij, [B, M_qs, K2_kvs])
-            # tkw.write(dp_ij, dp, elements_per_thread=STORE_ELEMS_PER_THREAD)
+            do_i_for_dv = tkw.read(do, elements_per_thread=LOAD_ELEMS_PER_THREAD)  # B x M  x N
+            dv_j = tkw.mma(p_ij, do_i_for_dv, dv_prev)  # B x M x K2 @ B x M x N -> B x
+            
+            v_j = tkw.read(v, elements_per_thread=LOAD_ELEMS_PER_THREAD)  # B x K2 x N
+            do_i_for_dp = tkw.read(do, mapping=flip_n_m_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            dp_acc = tkl.Register[B, M_qs, K2_kvs, tkl.f32](0.0)  # B x M  x K2
+            dp_ij = tkw.mma(do_i_for_dp, v_j, dp_acc)  # B x M x K2
+            tkw.write(dp_ij, dp, elements_per_thread=STORE_ELEMS_PER_THREAD)
 
-            # Doing this before do_i is used for dp_ij results in the latter
-            # being incorrect. Is permute operating inplace somehow?
-            dv_j = tkw.mma(p_ij, do_i, dv_prev)  # B x M x K2 @ B x M x N -> B x
             # D_i = tkw.read(D, elements_per_thread=1)  # B x M
             # dp_ij_sub = tkw.cast(dp_ij, tkl.f16) - tkw.broadcast(D_i, [B, M_qs, K2_kvs])
             # tkw.write(dp_ij_sub, dp_sub, elements_per_thread=STORE_ELEMS_PER_THREAD)
@@ -1803,7 +1805,7 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         mb_bwd = attention_bwd(
             q,
             k,
-            # v,
+            v,
             do.transpose(-1, -2),
             expanded_lse.transpose(-1, -2),
             # D,
@@ -1814,7 +1816,7 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
             # s_minus_l,
             p,
             # ds,
-            # dp,
+            dp,
             # dp_sub,
         )
             
