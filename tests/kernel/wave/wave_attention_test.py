@@ -809,7 +809,7 @@ def print_small_tensor(t, name=""):
     median = torch.median(abs)
     print_mode = "reg" if median > 0.1 or median == 0 else "sci"
     width = max(
-        len(f"{d:.3f}" if print_mode == "reg" else f"{d: .2e}")
+        len(f"{d: .3f}" if print_mode == "reg" else f"{d: .2e}")
         for d in t.flatten().tolist()
     )
 
@@ -1183,6 +1183,7 @@ def get_attention_bwd_kernel(
         k: tkl.Memory[B, K2_kvs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         # v: tkl.Memory[B, K2_kvs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         do: tkl.Memory[B, N_vd, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # This has to be loaded in this way or set_node_indices fails with resolving thread shapes
         lse: tkl.Memory[B, K2_kvs, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         # D: tkl.Memory[B, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         # dq: tkl.Memory[B, M_qs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
@@ -1356,7 +1357,7 @@ def get_attention_bwd_single_block_kernel(
         k: tkl.Memory[B, K2_kvs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         # v: tkl.Memory[B, K2_kvs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         # do: tkl.Memory[B, N_vd, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        lse: tkl.Memory[B, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        lse: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         # D: tkl.Memory[B, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         # dq: tkl.Memory[B, M_qs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         # dk: tkl.Memory[B, K2_kvs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
@@ -1375,11 +1376,11 @@ def get_attention_bwd_single_block_kernel(
         q_i = tkw.read(q, elements_per_thread=LOAD_ELEMS_PER_THREAD)  # B x M  x K1
         k_j = tkw.read(k, elements_per_thread=LOAD_ELEMS_PER_THREAD)  # B x K2 x K1
         # v_j = tkw.read(v, elements_per_thread=LOAD_ELEMS_PER_THREAD)  # B x K2 x N
-        lse_i = tkw.read(lse, elements_per_thread=1)
+        lse_i = tkw.read(lse, elements_per_thread=4)
 
         # s_acc = tkl.Register[B, M_qs, K2_kvs, tkl.f32](0.0)  # B x K2 x M
         # log2e = tkl.Register[B, M_qs, K2_kvs, tkl.f16](1.44269504089)  # B x M  x K2
-        sml = tkw.mma(q_i, k_j, -tkw.cast(tkw.broadcast(lse_i, [B, M_qs, K2_kvs]), tkl.f32))  # B x K2 x M
+        sml = tkw.mma(q_i, k_j, -tkw.cast(lse_i, tkl.f32))  # B x K2 x M
         # tkw.write(s_ij, s, elements_per_thread=STORE_ELEMS_PER_THREAD)
         # s_ij = tkw.permute(s_ij, [B, M_qs, K2_kvs]) # This should be entirely unnecessary
         # s_ij = tkw.permute(s_ij, [B, K2_kvs, M_qs])
@@ -1500,6 +1501,9 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
     # Fake derivative for whatever the loss function might be
     # do = to_default_device(
     #     torch.full((batch, q_seq_len, v_head_dim), 10, dtype=torch.float32)
+    # )
+    # do = to_default_device(
+    #     torch.arange(batch*q_seq_len, dtype=torch.float32).reshape((batch, q_seq_len, 1)).expand(batch, q_seq_len, v_head_dim)
     # )
     do = device_randn(batch, q_seq_len, v_head_dim)
     do_orig = do.detach().clone()
@@ -1707,7 +1711,7 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         # kernel, which we can't do with the base torch implementaiton.
         assert_close(lse, lse_loops, atol=5e-2, rtol=1e-2)
 
-    attention_bwd, hyperparams = get_attention_bwd_single_block_kernel(
+    attention_bwd, hyperparams = get_attention_bwd_kernel(
         batch=batch,
         kv_seq_len=kv_seq_len,
         qk_head_dim=qk_head_dim,
@@ -1800,15 +1804,15 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
             q,
             k,
             # v,
-            # do,
-            lse,
+            do.transpose(-1, -2),
+            expanded_lse.transpose(-1, -2),
             # D,
             # dq,
             # dk,
-            # dv,
-            # s,
-            s_minus_l,
-            # p,
+            dv,
+            s,
+            # s_minus_l,
+            p,
             # ds,
             # dp,
             # dp_sub,
@@ -1826,30 +1830,30 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         assert_close(v, v_orig.to(torch.float16))
         assert_close(do, do_orig.to(torch.float16))
 
-        # assert_close(s, s_ref, atol=5e-2, rtol=1e-2)
-        s_minus_l_ref = s_ref.to(torch.float16) - expanded_lse
-        print_small_tensor(s_ref, "s_ref")
-        print_small_tensor(lse)
-        print_small_tensor(s_minus_l_ref, "s_minus_l_ref")
-        print_small_tensor(s_minus_l, "s_minus_l")
-        implied_lse = s_ref - s_minus_l
-        print_small_tensor(implied_lse, "implied_lse")
-        for row in implied_lse.squeeze():
-            lse_used = []
-            for implied_lse_entry in row.tolist():
-                found_close = None
-                for i, lse_entry in enumerate(lse.squeeze()):
-                    if abs(implied_lse_entry - lse_entry) <= 1e-2 + 1e-4*lse_entry:
-                        if found_close is not None:
-                            print(f"Found multiple matches for {implied_lse_entry}")
-                        found_close = i
-                if found_close is None:
-                    print(f"Didn't find a match for {implied_lse_entry}")
-                lse_used.append(found_close)
-            print(" ".join([f"{d:2}" for d in lse_used]))
-        assert_close(s_minus_l, s_minus_l_ref, atol=5e-2, rtol=1e-2)
-        for row in p.isclose(p_ref, atol=5e-2, rtol=1e-2).squeeze():
-            print(" ".join(["T" if i else "F" for i in row.tolist()]))
+        assert_close(s, s_ref, atol=5e-2, rtol=1e-2)
+        # s_minus_l_ref = s_ref - expanded_lse
+        # print_small_tensor(s_ref, "s_ref")
+        # print_small_tensor(lse)
+        # print_small_tensor(s_minus_l_ref, "s_minus_l_ref")
+        # print_small_tensor(s_minus_l, "s_minus_l")
+        # implied_lse = s_ref - s_minus_l
+        # print_small_tensor(implied_lse, "implied_lse")
+        # for row in implied_lse.squeeze():
+        #     lse_used = []
+        #     for implied_lse_entry in row.tolist():
+        #         found_close = None
+        #         for i, lse_entry in enumerate(lse.squeeze()):
+        #             if abs(implied_lse_entry - lse_entry) <= 1e-2 + 1e-4*lse_entry:
+        #                 if found_close is not None:
+        #                     print(f"Found multiple matches for {implied_lse_entry}")
+        #                 found_close = i
+        #         if found_close is None:
+        #             print(f"Didn't find a match for {implied_lse_entry}")
+        #         lse_used.append(found_close)
+        #     print(" ".join([f"{d:2}" for d in lse_used]))
+        # assert_close(s_minus_l, s_minus_l_ref, atol=5e-2, rtol=1e-2)
+        # for row in p.isclose(p_ref, atol=5e-2, rtol=1e-2).squeeze():
+        #     print(" ".join(["T" if i else "F" for i in row.tolist()]))
         assert_close(p, p_ref, atol=5e-2, rtol=1e-2)
         assert_close(dv, dv_ref, atol=5e-2, rtol=1e-2)
 
