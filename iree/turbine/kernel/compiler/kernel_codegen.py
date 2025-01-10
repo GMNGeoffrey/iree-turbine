@@ -251,13 +251,13 @@ class KernelSignature:
         # Extract all placeholder nodes.
         placeholder_nodes = filter_fx_graph(graph, is_placeholder)
 
-        def only_read_dependencies(node):
-            return all([isinstance(get_custom(x), Read) for x in node.users.keys()])
+        # def only_read_dependencies(node):
+        #     return all([isinstance(get_custom(x), Read) for x in node.users.keys()])
 
-        def only_write_dependencies(node):
-            if len(node.users) == 0:
-                return False
-            return all([isinstance(get_custom(x), Write) for x in node.users.keys()])
+        # def only_write_dependencies(node):
+        #     if len(node.users) == 0:
+        #         return False
+        #     return all([isinstance(get_custom(x), Write) for x in node.users.keys()])
 
         for node in placeholder_nodes:
             index = None
@@ -268,13 +268,15 @@ class KernelSignature:
             if index == None:
                 continue
 
-            # TODO: Match KernelBufferUsage to what bufferType that is expected on IREE.
-            usage = KernelBufferUsage.INPUT
-            if only_read_dependencies(node):
-                usage = KernelBufferUsage.INPUT
+            # # TODO: Match KernelBufferUsage to what bufferType that is expected on IREE.
+            # usage = KernelBufferUsage.INPUT
+            # if only_read_dependencies(node):
+            #     usage = KernelBufferUsage.INPUT
 
-            if only_write_dependencies(node):
-                usage = KernelBufferUsage.OUTPUT
+            # if only_write_dependencies(node):
+            #     usage = KernelBufferUsage.OUTPUT
+            
+            usage = KernelBufferUsage.OUTPUT
 
             # Create new Memory type with the correct usage
             memory_type = self.bindings[index].kernel_buffer_type
