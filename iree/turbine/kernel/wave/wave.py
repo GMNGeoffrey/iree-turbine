@@ -373,10 +373,8 @@ class LaunchableWave(Launchable):
             curry_constraints(promote_placeholders),
             # Set indices.
             curry_constraints(set_node_indices),
-            print_node_indices,
             # Expansion
             curry_constraints(expand_graph),
-            print_node_indices,
             # Set post expansion indices.
             curry_constraints(set_post_expansion_indices),
             # Clean up chains of GetResults
