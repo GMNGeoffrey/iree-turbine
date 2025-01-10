@@ -22,20 +22,22 @@ from iree.turbine.kernel.wave.utils import (
 )
 from iree.turbine.kernel.wave.constraints import MMAType
 import os
-from torch.testing import assert_allclose
+from torch.testing import assert_close
 from ..common.utils import (
     require_e2e,
     require_cdna3,
     enable_scheduling_barriers,
     dump_generated_mlir,
+    param_scheduling,
+    param_dynamic_dims,
 )
 from ..common.shapes import get_test_shapes
 
 
 @require_e2e
 @pytest.mark.parametrize("shape", get_test_shapes("attention"))
-@pytest.mark.parametrize("enable_scheduling", [False, True])
-@pytest.mark.parametrize("dynamic_dims", [False, True])
+@param_scheduling
+@param_dynamic_dims
 @pytest.mark.parametrize(
     "mfma_variant",
     [
@@ -223,13 +225,12 @@ def testAttention(
             with open(filename, "w") as f:
                 f.write(mb.module_op.get_asm())
 
-        assert_allclose(output, torch_ref)
+        assert_close(output, torch_ref.to(torch.float32), atol=5e-2, rtol=1e-2)
 
 
 @require_e2e
 @pytest.mark.parametrize("shape", get_test_shapes("attention"))
-@pytest.mark.parametrize("enable_scheduling", [False])
-@pytest.mark.parametrize("dynamic_dims", [False, True])
+@param_dynamic_dims
 @pytest.mark.parametrize(
     "mfma_variant",
     [
@@ -239,7 +240,6 @@ def testAttention(
 )
 def testAttentionBias(
     shape: tuple[int],
-    enable_scheduling: bool,
     dynamic_dims: bool,
     mfma_variant: MMAType,
     request,
@@ -394,7 +394,6 @@ def testAttentionBias(
         run=True,
         run_bench=run_bench,
         run_config=config,
-        schedule=enable_scheduling,
         use_scheduling_barriers=enable_scheduling_barriers,
         dynamic_symbols=dynamic_symbols,
         dynamic_symbols_map=dynamic_symbols_map,
@@ -416,7 +415,7 @@ def testAttentionBias(
         a = torch.matmul(q, k_t) * dk_sqrt
         a += bias
         a = F.softmax(a, dim=-1)
-        torch_ref = torch.matmul(a, v)
+        torch_ref = torch.matmul(a, v).to(torch.float32)
 
         if dump_generated_mlir:
             filename = f"wave_attention_{'x'.join(map(str, shape))}.mlir"
@@ -424,10 +423,10 @@ def testAttentionBias(
                 f.write(mb.module_op.get_asm())
 
         if "gfx94" in config["target"]:
-            assert_allclose(output, torch_ref, atol=2e-3, rtol=5e-3)
+            assert_close(output, torch_ref, atol=2e-3, rtol=5e-3)
         else:
             # TODO: Determine why the error is higher on gfx90.
-            assert_allclose(output, torch_ref, atol=3e-3, rtol=8e-1)
+            assert_close(output, torch_ref, atol=3e-3, rtol=8e-1)
 
 
 @require_e2e

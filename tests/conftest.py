@@ -5,7 +5,9 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 import pytest
-
+from iree.turbine.kernel.wave.utils import (
+    get_default_arch,
+)
 
 def pytest_addoption(parser):
     parser.addoption(
@@ -74,7 +76,6 @@ def pytest_collection_modifyitems(config, items):
         is_validate_only = _has_marker(item, "validate_only")
         is_perf_only = _has_marker(item, "perf_only")
         is_scheduling = _has_marker(item, "scheduling")
-        has_dynamic_dims = _has_marker(item, "dynamic_dims")
         if run_perf:
             if not is_perf_only or is_validate_only:
                 item.add_marker(pytest.mark.skip("skip non-perf test"))
@@ -83,6 +84,4 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(pytest.mark.skip("skip perf test"))
 
         if is_scheduling:
-            item.add_marker(pytest.mark.skip("skip scheduling test"))
-        if has_dynamic_dims:
-            item.add_marker(pytest.mark.skip("skip dynamic shapes test"))
+            item.add_marker(pytest.mark.skipif("gfx94" not in get_default_arch(), reason="Scheduling tests only work on CDNA3"))

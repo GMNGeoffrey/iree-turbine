@@ -33,7 +33,6 @@ from ..common.shapes import get_test_shapes
 
 @require_e2e
 @pytest.mark.parametrize("shape", get_test_shapes("chained_gemm"))
-@pytest.mark.parametrize("enable_scheduling", [False])
 @pytest.mark.parametrize(
     "mfma_variant",
     [
@@ -43,7 +42,6 @@ from ..common.shapes import get_test_shapes
 )
 def testChainedGemm(
     shape: tuple[int],
-    enable_scheduling: bool,
     mfma_variant: MMAType,
     request,
 ):
@@ -149,7 +147,6 @@ def testChainedGemm(
         run=True,
         run_bench=run_bench,
         run_config=config,
-        schedule=enable_scheduling,
         use_scheduling_barriers=enable_scheduling_barriers,
     ):
         q = device_randn(shape[0], shape[1], shape[3], dtype=torch.float16)
@@ -169,11 +166,15 @@ def testChainedGemm(
         )
         assert_close(output, iree_ref, check_device=False)
 
+        torch_qk = torch.matmul(q, k.transpose(-1, -2))  # m x k1 @ k1 x k2 -> m x k2
+        torch_ref = torch.matmul(torch_qk, v.transpose(-1, -2))
+        output_for_cmp = output.transpose(-1, -2).to(torch.float16)
+        assert_close(output_for_cmp, torch_ref, atol=5e-2, rtol=1e-2)
+
 
 @require_e2e
 @require_cdna3
 @pytest.mark.parametrize("shape", get_test_shapes("chained_gemm"))
-@pytest.mark.parametrize("enable_scheduling", [False])
 @pytest.mark.parametrize(
     "mfma_variant",
     [
@@ -182,7 +183,7 @@ def testChainedGemm(
     ],
 )
 def testChainedGemmF8(
-    shape: tuple[int], enable_scheduling: bool, mfma_variant: tuple[MMAType], request
+    shape: tuple[int], mfma_variant: tuple[MMAType], request
 ):
     run_bench = request.config.getoption("--runperf")
     dump_perf = request.config.getoption("--dump-perf-files-path")
@@ -289,7 +290,6 @@ def testChainedGemmF8(
         run=True,
         run_bench=run_bench,
         run_config=config,
-        schedule=enable_scheduling,
         use_scheduling_barriers=enable_scheduling_barriers,
     ):
         torch.manual_seed(0)
