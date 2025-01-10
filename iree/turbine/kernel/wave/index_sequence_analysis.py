@@ -351,9 +351,12 @@ def verify_nodes(trace: CapturedTrace):
             continue
         assert custom.index, f"Index not set for node {custom.fx_node}: {custom}"
         assert custom.vector_shapes, f"Vector shapes not set for node {custom.fx_node}: {custom}"
-        batchless_index = {k: v for k, v in custom.index.items() if str(k) != "B"}
-        # print(f"{custom.fx_node}: {batchless_index}")
 
+
+def print_node_indices(trace: CapturedTrace):
+    for node in trace.walk():
+        custom = get_custom(node)
+        print(f"{custom.fx_node}: {custom.index}")
 
 def set_node_indices(trace: CapturedTrace, constraints: list[Constraint]):
     mma_index = get_mma_dimensional_mapping(trace, get_hardware_constraint(constraints))

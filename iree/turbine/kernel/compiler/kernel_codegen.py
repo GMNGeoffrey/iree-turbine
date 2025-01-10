@@ -302,6 +302,21 @@ class KernelSignature:
                 part += f" ({b.symbol_type})"
             
             parts.append(part)
+        return f"{self.__class__}({', '.join(parts)})"
+    
+    def __str__(self):
+        parts = []
+        for b in self.bindings:
+            part = repr(b.reference)
+            name = b.name or repr(b.reference)
+
+            type_str = b.binding_type.name
+            if b.binding_type == BindingType.KERNEL_BUFFER:
+                type_str += f".{b.kernel_buffer_type.usage.name}.{b.kernel_buffer_type}"
+            elif b.binding_type == BindingType.SYMBOL_VALUE:
+                type_str += f".{b.symbol_type}"
+
+            parts.append(f"{name}: {type_str}")
         return f"Signature({', '.join(parts)})"
 
 

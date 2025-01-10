@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 import functools
+import re
 from typing import Any, Callable, Optional
 import torch.fx as fx
 import inspect
@@ -49,6 +50,7 @@ from .index_sequence_analysis import (
     partition_ops_with_gpr_offsets,
     partition_strided_operators,
     set_node_indices,
+    print_node_indices,
     set_post_expansion_indices,
 )
 from .shared_memory_indexing import (
@@ -371,8 +373,10 @@ class LaunchableWave(Launchable):
             curry_constraints(promote_placeholders),
             # Set indices.
             curry_constraints(set_node_indices),
+            print_node_indices,
             # Expansion
             curry_constraints(expand_graph),
+            print_node_indices,
             # Set post expansion indices.
             curry_constraints(set_post_expansion_indices),
             # Clean up chains of GetResults
@@ -434,6 +438,9 @@ class LaunchableWave(Launchable):
             # Take advantage of Python leaking loop variables
             print(f"After final pass {p.__name__}:\n{trace}\n")
 
+        if compile_config.get("print_indices", False):
+            print_node_indices(trace)
+
         # Determine grid shape.
         self.grid_type.dims = [1, 1, 1]
         max_workgroup_dim = 2
@@ -466,7 +473,6 @@ class LaunchableWave(Launchable):
         exe = dispatch_codegen.StreamExecutable(mb, name=entrypoint_name)
         workgroup_size = self.hardware_constraints[0].threads_per_block
         subgroup_size = self.hardware_constraints[0].threads_per_wave
-        #print("Created module builder")
 
         # Setup LLVM func compilation configs.
         llvm_func_config = {}
@@ -487,18 +493,35 @@ class LaunchableWave(Launchable):
             dynamic_symbols,
             llvm_func_config,
         )
-        #print("Done define entrypoint")
 
         emitter = WaveEmitter(
             dispatch_entrypoint, trace, self.constraints, dynamic_symbols
         )
         emitter.emit(trace.get_root_graph())
         emitter.finish()
-        #print("Done emit")
 
         if kwargs.get("canonicalize", False):
             canonicalize_module(mb.module_op)
-        #print("Done canoncialize")
+
+        if compile_config.get("print_pretty_mlir", False):
+            asm = mb.module_op.get_asm()
+            for i, b in enumerate(kernel_sig.kernel_buffer_bindings):
+                if b.name:
+                    asm = re.sub(rf"%arg{i}\b", f"%arg_{b.name}", asm)
+                    arg_access = re.findall(rf"(%\d+) = stream.binding.subspan %arg_{b.name}\[%c0\]", asm)
+                    if len(arg_access) > 1:
+                        raise RuntimeError(f"Found more than one access of binding {b.name}")
+                    if arg_access:
+                        asm = re.sub(rf"{arg_access[0]}\b", f"%{b.name}", asm)
+            log2e_matches = re.findall(r"(%\w+) = arith.constant dense<1\.442380e\+00> : vector<(\d+)x(f\d+)>", asm)
+            for m in log2e_matches:
+                ssa, v_size, dtype = m
+                asm = re.sub(rf"{ssa}\b", f"log2e_{v_size}v{dtype}", asm)
+            zero_matches = re.findall(r"(%\w+) = arith.constant dense<0\.0*e\+00> : vector<(\d+)x(f\d+)>", asm)
+            for m in zero_matches:
+                ssa, v_size, dtype = m
+                asm = re.sub(rf"{ssa}\b", f"c0_{v_size}v{dtype}", asm)
+            print("Prettified MLIR:\n", asm)
 
         return mb, trace, exe, kernel_sig, entrypoint_name
 

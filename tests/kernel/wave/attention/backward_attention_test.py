@@ -472,35 +472,32 @@ def get_attention_bwd_kernel(
     def attention_bwd(
         q: tkl.Memory[B, M_qs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         k: tkl.Memory[B, K2_kvs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        v: tkl.Memory[B, K2_kvs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # v: tkl.Memory[B, K2_kvs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         do: tkl.Memory[B, N_vd, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         # This has to be loaded in this way or set_node_indices fails with resolving thread shapes
         lse: tkl.Memory[B, K2_kvs, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        D: tkl.Memory[B, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        dq: tkl.Memory[B, M_qs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        dk: tkl.Memory[B, K2_kvs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # D: tkl.Memory[B, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # dq: tkl.Memory[B, M_qs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # dk: tkl.Memory[B, K2_kvs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         dv: tkl.Memory[B, K2_kvs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        s: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
-        p: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        ds: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        dp: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
-        dp_sub: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # s: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
+        # p: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # ds: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # dp: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
+        # dp_sub: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
     ):
 
         dv_init = tkl.Register[B, K2_kvs, N_vd, tkl.f32](0.0)
-        dk_init = tkl.Register[B, K2_kvs, K1_qkd, tkl.f32](0.0)
+        # dk_init = tkl.Register[B, K2_kvs, K1_qkd, tkl.f32](0.0)
 
         @tkw.reduction(M_qs, init_args=[
             dv_init,
-            dk_init,
+            # dk_init,
         ])
         def loop_q_seq_len(
             dv_prev: tkl.Register[B, K2_kvs, N_vd, tkl.f32],
-            dk_prev: tkl.Register[B, K2_kvs, K1_qkd, tkl.f32],
-        ) -> tuple[
-            tkl.Register[B, K2_kvs, N_vd, tkl.f32],
-            tkl.Register[B, K2_kvs, K1_qkd, tkl.f32],
-        ]:
+            # dk_prev: tkl.Register[B, K2_kvs, K1_qkd, tkl.f32],
+        ):
             k_j = tkw.read(k, elements_per_thread=LOAD_ELEMS_PER_THREAD)
             q_i = tkw.read(q, elements_per_thread=LOAD_ELEMS_PER_THREAD)
 
@@ -508,61 +505,64 @@ def get_attention_bwd_kernel(
             log2e = tkl.Register[B, M_qs, K2_kvs, tkl.f16](1.44269504089)
             s_ij = tkw.mma(q_i, k_j, s_acc)
             # TODO: Only half the elements get written if K2 is 32 here
-            tkw.write(s_ij, s, elements_per_thread=STORE_ELEMS_PER_THREAD)
+            # tkw.write(s_ij, s, elements_per_thread=STORE_ELEMS_PER_THREAD)
             # s_ij = tkw.permute(s_ij, [B, M_qs, K2_kvs])
             s_ij = tkw.permute(s_ij, [B, K2_kvs, M_qs])
             lse_i = tkw.read(lse, elements_per_thread=LOAD_ELEMS_PER_THREAD)
             p_ij = tkw.exp2(log2e * (tkw.cast(s_ij, tkl.f16) - lse_i))
-            tkw.write(p_ij, p, mapping=flip_k2_m_write_mapping, elements_per_thread=STORE_ELEMS_PER_THREAD)
+            # tkw.write(p_ij, p, mapping=flip_k2_m_write_mapping, elements_per_thread=STORE_ELEMS_PER_THREAD)
 
             do_i_for_dv = tkw.read(do, elements_per_thread=LOAD_ELEMS_PER_THREAD)
             dv_j = tkw.mma(p_ij, do_i_for_dv, dv_prev)
             
-            v_j = tkw.read(v, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-            # This has to be loaded separately so N is the fastest-varying dimension
-            do_i_for_dp = tkw.read(do, mapping=flip_n_m_write_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-            dp_acc = tkl.Register[B, K2_kvs, M_qs, tkl.f32](0.0)
-            dp_ij = tkw.mma(v_j, do_i_for_dp, dp_acc)
-            dp_ij = tkw.permute(dp_ij, [B, M_qs, K2_kvs])
-            tkw.write(dp_ij, dp, elements_per_thread=STORE_ELEMS_PER_THREAD)
+            # v_j = tkw.read(v, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            # # This has to be loaded separately so N is the fastest-varying dimension
+            # do_i_for_dp = tkw.read(do, mapping=flip_n_m_write_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            # dp_acc = tkl.Register[B, K2_kvs, M_qs, tkl.f32](0.0)
+            # dp_ij = tkw.mma(v_j, do_i_for_dp, dp_acc)
+            # dp_ij = tkw.permute(dp_ij, [B, M_qs, K2_kvs])
+            # tkw.write(dp_ij, dp, elements_per_thread=STORE_ELEMS_PER_THREAD)
 
-            D_i = tkw.read(D, elements_per_thread=1)
-            dp_ij_sub = tkw.cast(dp_ij, tkl.f16) - tkw.broadcast(D_i, [B, M_qs, K2_kvs])
-            tkw.write(dp_ij_sub, dp_sub, elements_per_thread=STORE_ELEMS_PER_THREAD)
+            # D_i = tkw.read(D, elements_per_thread=1)
+            # dp_ij_sub = tkw.cast(dp_ij, tkl.f16) - tkw.broadcast(D_i, [B, M_qs, K2_kvs])
+            # tkw.write(dp_ij_sub, dp_sub, elements_per_thread=STORE_ELEMS_PER_THREAD)
             
-            # Just multiplying p_ij * dp_ij_sub breaks the previously calculated
-            # dp. Trying to write dp_sub and then read it back again just
-            # results in ds being mostly zero (race condition?). Trying to pass
-            # in the reference dp_sub doesn't fix it though. It actually looks
-            # like it's just really bad numerics maybe?
-            # But loading back p works, so probably this is another shape/layout thing I don't understand.
-            # dp_ij_sub_for_ds = dp_ij_sub # tkw.read(dp_sub_ref, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            # # Just multiplying p_ij * dp_ij_sub breaks the previously calculated
+            # # dp. Trying to write dp_sub and then read it back again just
+            # # results in ds being mostly zero (race condition?). Trying to pass
+            # # in the reference dp_sub doesn't fix it though. It actually looks
+            # # like it's just really bad numerics maybe?
+            # # But loading back p works, so probably this is another shape/layout thing I don't understand.
+            # # dp_ij_sub_for_ds = dp_ij_sub # tkw.read(dp_sub_ref, elements_per_thread=LOAD_ELEMS_PER_THREAD)
             
-            # We have to read this back again :-(
-            p_ij_for_ds = tkw.read(p, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-            ds_ij = p_ij_for_ds * dp_ij_sub
-            tkw.write(ds_ij, ds, elements_per_thread=STORE_ELEMS_PER_THREAD)
+            # # We have to read this back again :-(
+            # p_ij_for_ds = tkw.read(p, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            # ds_ij = p_ij_for_ds * dp_ij_sub
+            # tkw.write(ds_ij, ds, elements_per_thread=STORE_ELEMS_PER_THREAD)
 
-            ds_ij_for_dk = tkw.read(ds, mapping=flip_m_k2_read_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-            q_i_for_dk = tkw.read(q, mapping=flip_m_k1_read_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-            dk_j = tkw.mma(ds_ij_for_dk, q_i_for_dk, dk_prev)
+            # ds_ij_for_dk = tkw.read(ds, mapping=flip_m_k2_read_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            # q_i_for_dk = tkw.read(q, mapping=flip_m_k1_read_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            # dk_j = tkw.mma(ds_ij_for_dk, q_i_for_dk, dk_prev)
 
-            k_j_for_dq = tkw.read(k, mapping=flip_k2_k1_read_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-            dq_prev = tkw.read(dq, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-            dq_i = tkw.mma(ds_ij, k_j_for_dq, tkw.cast(dq_prev, tkl.f32))
-            tkw.write(dq_i, dq, elements_per_thread=STORE_ELEMS_PER_THREAD)
-            return dv_j, dk_j
+            # k_j_for_dq = tkw.read(k, mapping=flip_k2_k1_read_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            # dq_prev = tkw.read(dq, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            # dq_i = tkw.mma(ds_ij, k_j_for_dq, tkw.cast(dq_prev, tkl.f32))
+            # tkw.write(dq_i, dq, elements_per_thread=STORE_ELEMS_PER_THREAD)
+            return (
+                dv_j
+                # dk_j,
+            )
 
         (
-            dv_j,
-            dk_j,
+            dv_j
+            # dk_j,
         ) = loop_q_seq_len
         tkw.write(
             tkw.cast(dv_j, tkl.f16), dv, elements_per_thread=STORE_ELEMS_PER_THREAD
         )
-        tkw.write(
-            tkw.cast(dk_j, tkl.f16), dk, elements_per_thread=STORE_ELEMS_PER_THREAD
-        )
+        # tkw.write(
+        #     tkw.cast(dk_j, tkl.f16), dk, elements_per_thread=STORE_ELEMS_PER_THREAD
+        # )
 
     hyperparams = {
         ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
@@ -965,7 +965,7 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         "waves_per_eu": 2,
         "denorm_fp_math_f32": "preserve-sign",
         # "print_grid": True,
-        "print_ir_after": ["set_node_indices", "expand_graph", "first", "last"],
+        # "print_ir_after": ["set_node_indices", "expand_graph", "first", "last"],
     }
 
     dynamic_symbols = []
@@ -998,7 +998,7 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         )
 
         if dump_generated_mlir:
-            filename = f"wave_attention_{'x'.join(map(str, shape))}.mlir"
+            filename = f"wave_attention_fwd_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb_fwd.module_op.get_asm())
             print(f"IR dumped to {filename}")
@@ -1025,9 +1025,11 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
     compile_config = {
         "waves_per_eu": 2,
         "denorm_fp_math_f32": "preserve-sign",
-        # "print_ir_after": ["last", "set_node_indices"],
+        "print_ir_after": ["first", "last", "set_node_indices", "expand_graph"],
         # "print_ir_before": ["first", "set_node_indices"],
-        # "print_signature": True,
+        "print_signature": True,
+        "print_pretty_mlir": True,
+        "print_indices": True,
     }
 
     with tk.gen.TestLaunchContext(
@@ -1105,18 +1107,18 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         mb_bwd = attention_bwd(
             q,
             k,
-            v,
+            # v,
             do.transpose(-1, -2),
             expanded_lse.transpose(-1, -2),
-            D,
-            dq,
-            dk,
+            # D,
+            # dq,
+            # dk,
             dv,
-            s,
-            p,
-            ds,
-            dp,
-            dp_sub,
+            # s,
+            # p,
+            # ds,
+            # dp,
+            # dp_sub,
         )
             
         if dump_generated_mlir:
@@ -1131,7 +1133,7 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         assert_close(v, v_orig.to(torch.float16))
         assert_close(do, do_orig.to(torch.float16))
 
-        assert_close(s, s_ref, atol=5e-2, rtol=1e-2)
+        # assert_close(s, s_ref, atol=5e-2, rtol=1e-2)
         # s_minus_l_ref = s_ref - expanded_lse
         # print_small_tensor(s_ref, "s_ref")
         # print_small_tensor(lse)
@@ -1155,13 +1157,13 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         # assert_close(s_minus_l, s_minus_l_ref, atol=5e-2, rtol=1e-2)
         # for row in p.isclose(p_ref, atol=5e-2, rtol=1e-2).squeeze():
         #     print(" ".join(["T" if i else "F" for i in row.tolist()]))
-        assert_close(p, p_ref, atol=5e-2, rtol=1e-2)
+        # assert_close(p, p_ref, atol=5e-2, rtol=1e-2)
         assert_close(dv, dv_ref, atol=5e-2, rtol=1e-2)
 
         assert_close(dp, dp_ref, atol=5e-2, rtol=1e-2)
         assert_close(dp_sub, dp_sub_ref, atol=5e-2, rtol=1e-2)
 
-        # I don't actually understand why this works
+        # I don't actually understand why this way of calculating ds works at all.
         assert_close(ds_ref, p_ref*dp_sub_ref, atol=5e-2, rtol=1e-2)
         
         # print_small_tensor(ds_ref, "ds_ref")
@@ -1284,3 +1286,104 @@ def testReproWriteInLoopBug():
         
         assert_close(m, m_ref, atol=5e-2, rtol=1e-2)
         assert_close(s, s_ref, atol=5e-2, rtol=1e-2)
+
+
+def testReproWriteAlongUnconstrainedDimension():
+    shape = (16, 32, 16, 16)
+    q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
+    mfma_variant = MMAType.F32_16x16x16_F16
+    M = tkl.sym.M
+    N = tkl.sym.N
+    K1 = tkl.sym.K1
+    K2 = tkl.sym.K2
+
+    LOAD_ELEMS_PER_THREAD = tkl.sym.LOAD_ELEMS_PER_THREAD
+    STORE_ELEMS_PER_THREAD = tkl.sym.STORE_ELEMS_PER_THREAD
+
+    constraints: list[tkw.Constraint] = [
+        tkw.WorkgroupConstraint(K2, K2, 0),
+        tkw.HardwareConstraint(
+            threads_per_wave=64,
+            waves_per_block=(1, 1, 1),
+            mma_type=mfma_variant,
+        )
+    ]
+
+    @tkw.wave(constraints)
+    def attention_bwd(
+        q: tkl.Memory[M, K1, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        k: tkl.Memory[K2, K1, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        do: tkl.Memory[N, M, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        dv: tkl.Memory[K2, N, GLOBAL_ADDRESS_SPACE, tkl.f32],
+    ):
+        dv_init = tkl.Register[K2, N, tkl.f32](0.0)
+
+        k_j = tkw.read(k, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+        q_i = tkw.read(q, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+
+        s_acc = tkl.Register[M, K2, tkl.f32](0.0)
+        s_ij = tkw.mma(q_i, k_j, s_acc)
+        s_ij = tkw.permute(s_ij, [K2, M])
+
+        do_i = tkw.read(do, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+        dv_j = tkw.mma(tkw.cast(s_ij, tkl.f16), do_i, dv_init)
+            
+        tkw.write(dv_j, dv, elements_per_thread=STORE_ELEMS_PER_THREAD)
+
+    hyperparams = {
+        LOAD_ELEMS_PER_THREAD: get_mfma_load_elems_per_thread(mfma_variant),
+        STORE_ELEMS_PER_THREAD: get_mfma_store_elems_per_thread(mfma_variant),
+        M: q_seq_len,
+        N: v_head_dim,
+        K1: qk_head_dim,
+        K2: kv_seq_len,
+    }
+
+    hyperparams.update(get_default_scheduling_params())
+    config = get_default_run_config()
+    # config["print_ir_after_all"] = True
+    compile_config = {
+        "waves_per_eu": 2,
+        "denorm_fp_math_f32": "preserve-sign",
+        "print_ir_after": ["first", "last", "set_node_indices", "expand_graph"],
+        # "print_ir_before": ["first", "set_node_indices"],
+        "print_signature": True,
+        "print_pretty_mlir": True,
+        "print_indices": True,
+    }
+
+    with tk.gen.TestLaunchContext(
+        hyperparams,
+        canonicalize=True,
+        run=True,
+        run_bench=False,
+        run_config=config,
+        compile_config=compile_config,
+        schedule=False,
+        use_scheduling_barriers=enable_scheduling_barriers,
+    ):
+        
+        torch.manual_seed(0)
+        q = torch.full((q_seq_len, qk_head_dim), 0.1, device=get_default_device(), dtype=torch.float16)
+        k = torch.full((kv_seq_len, qk_head_dim), 0.2, device=get_default_device(), dtype=torch.float16)
+        do = torch.full((q_seq_len, v_head_dim), 0.3, device=get_default_device(), dtype=torch.float16)
+
+        s_ref = torch.matmul(q, k.transpose(-1, -2))
+        dv_ref = torch.matmul(s_ref.transpose(-1, -2), do)
+
+        dv = device_zeros(kv_seq_len, v_head_dim)
+        mb_bwd = attention_bwd(
+            q,
+            k,
+            do.transpose(-1, -2),
+            dv,
+        )
+            
+        if dump_generated_mlir:
+            filename = f"wave_chained_gemm_undistributed_{'x'.join(map(str, shape))}.mlir"
+            with open(filename, "w") as f:
+                f.write(mb_bwd.module_op.get_asm())
+            print(f"IR dumped to {filename}")
+
+        assert_close(dv, dv_ref.to(torch.float32), atol=1e-3, rtol=1e-4)
+
