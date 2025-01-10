@@ -1922,8 +1922,7 @@ def testReproWriteInLoopBug():
 
     # Expose user-constraints
     constraints: list[tkw.Constraint] = [tkw.WorkgroupConstraint(M, M, 0)]
-    constraints += [tkw.WorkgroupConstraint(K2, K2, 1)]
-    # constraints += [tkw.TilingConstraint(K2, BLOCK_K2)]
+    constraints += [tkw.TilingConstraint(K2, BLOCK_K2)]
 
     constraints += [
         tkw.HardwareConstraint(
@@ -1942,17 +1941,17 @@ def testReproWriteInLoopBug():
     ):
         init_m = tkl.Register[M, tkl.f32](-1e6)
 
-        # @tkw.reduction(K2, init_args=[init_m])
-        # def repeat(m_prev: tkl.Register[M, tkl.f32]) -> tkl.Register[M, tkl.f32]:
-        s_acc = tkl.Register[K2, M, tkl.f32](0.0)
-        q_i = tkw.read(q, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-        k_j = tkw.read(k, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-        s_ij = tkw.mma(k_j, q_i, s_acc)
-        s_ij = tkw.permute(s_ij, target_shape=[M, K2])
-        tkw.write(s_ij, s, elements_per_thread=STORE_ELEMS_PER_THREAD)
-        m_ij = tkw.max(s_ij, init_m, dim=K2)
-            # return m_ij
-        tkw.write(m_ij, max, elements_per_thread=1)
+        @tkw.reduction(K2, init_args=[init_m])
+        def repeat(m_prev: tkl.Register[M, tkl.f32]) -> tkl.Register[M, tkl.f32]:
+            s_acc = tkl.Register[K2, M, tkl.f32](0.0)
+            q_i = tkw.read(q, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            k_j = tkw.read(k, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            s_ij = tkw.mma(k_j, q_i, s_acc)
+            s_ij = tkw.permute(s_ij, target_shape=[M, K2])
+            tkw.write(s_ij, s, elements_per_thread=STORE_ELEMS_PER_THREAD)
+            m_ij = tkw.max(s_ij, m_prev, dim=K2)
+            return m_ij
+        tkw.write(repeat, max, elements_per_thread=1)
 
     hyperparams = {
         ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
