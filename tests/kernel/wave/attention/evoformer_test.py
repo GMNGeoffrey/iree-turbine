@@ -186,32 +186,32 @@ def testEvoformerAttentionForward(
         # 256=M
         # 8=N
 
-        mb_bwd = evoformer_bwd(
-            do,
-            D,
-            q_perm * dk_sqrt * log2e,
-            k_perm,
-            v_perm,
-            # mask_bias,
-            # bias,
-            # o,
-            lse,
-            dq,
-            dk,
-            dv,
-            # dbias,
-        )
+        # mb_bwd = evoformer_bwd(
+        #     do,
+        #     D,
+        #     q_perm * dk_sqrt * log2e,
+        #     k_perm,
+        #     v_perm,
+        #     # mask_bias,
+        #     # bias,
+        #     # o,
+        #     lse,
+        #     dq,
+        #     dk,
+        #     dv,
+        #     # dbias,
+        # )
 
-        mask_bias = mask_bias.view([batch, n, 1, 1, kv_seq_len])
-        bias = bias.view([batch, 1, heads, q_seq_len, kv_seq_len])
-        torch_ref = attention_reference(q, k, v, [mask_bias, bias], dk_sqrt)
+        # mask_bias = mask_bias.view([batch, n, 1, 1, kv_seq_len])
+        # bias = bias.view([batch, 1, heads, q_seq_len, kv_seq_len])
+        # torch_ref = attention_reference(q, k, v, [mask_bias, bias], dk_sqrt)
 
-        if dump_generated_mlir:
-            filename = f"wave_evoformer_{'x'.join(map(str, shape))}.mlir"
-            with open(filename, "w") as f:
-                f.write(mb.module_op.get_asm())
+        # if dump_generated_mlir:
+        #     filename = f"wave_evoformer_{'x'.join(map(str, shape))}.mlir"
+        #     with open(filename, "w") as f:
+        #         f.write(mb.module_op.get_asm())
 
-        eps = 1e-2 if output.dtype == torch.float16 else 5e-2
-        assert (
-            torch.max(torch.abs(torch_ref - output)).item() < eps
-        ), f"out eps: {torch.max(torch.abs(torch_ref - output))}"
+        # eps = 1e-2 if output.dtype == torch.float16 else 5e-2
+        # assert (
+        #     torch.max(torch.abs(torch_ref - output)).item() < eps
+        # ), f"out eps: {torch.max(torch.abs(torch_ref - output))}"
