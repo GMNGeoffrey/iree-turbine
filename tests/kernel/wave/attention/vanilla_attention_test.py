@@ -19,10 +19,11 @@ from iree.turbine.kernel.wave.utils import (
     get_mfma_store_elems_per_thread,
     device_randn,
     device_zeros,
+    get_default_device,
 )
 from iree.turbine.kernel.wave.constraints import MMAType
 import os
-from torch.testing import assert_allclose
+from torch.testing import assert_close
 from ..common.utils import (
     require_e2e,
     require_cdna3,
@@ -223,7 +224,7 @@ def testAttention(
             with open(filename, "w") as f:
                 f.write(mb.module_op.get_asm())
 
-        assert_allclose(output, torch_ref)
+        assert_close(output, torch_ref)
 
 
 @require_e2e
@@ -424,10 +425,10 @@ def testAttentionBias(
                 f.write(mb.module_op.get_asm())
 
         if "gfx94" in config["target"]:
-            assert_allclose(output, torch_ref, atol=2e-3, rtol=5e-3)
+            assert_close(output, torch_ref, atol=2e-3, rtol=5e-3)
         else:
             # TODO: Determine why the error is higher on gfx90.
-            assert_allclose(output, torch_ref, atol=3e-3, rtol=8e-1)
+            assert_close(output, torch_ref, atol=3e-3, rtol=8e-1)
 
 
 @require_e2e
@@ -590,3 +591,105 @@ def testAttentionF8(
                 f.write(mb.module_op.get_asm())
         rmse = torch.sqrt(torch.mean(torch.square(output - torch_ref)))
         assert rmse <= 0.006
+
+
+
+def testReproWriteAlongUnconstrainedDimension():
+    shape = (16, 32, 16, 16)
+    q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
+    mfma_variant = MMAType.F32_16x16x16_F16
+    M = tkl.sym.M
+    N = tkl.sym.N
+    K1 = tkl.sym.K1
+    K2 = tkl.sym.K2
+
+    LOAD_ELEMS_PER_THREAD = tkl.sym.LOAD_ELEMS_PER_THREAD
+    STORE_ELEMS_PER_THREAD = tkl.sym.STORE_ELEMS_PER_THREAD
+
+    constraints: list[tkw.Constraint] = [
+        tkw.WorkgroupConstraint(K2, K2, 0),
+        tkw.HardwareConstraint(
+            threads_per_wave=64,
+            waves_per_block=(1, 1, 1),
+            mma_type=mfma_variant,
+        )
+    ]
+
+    @tkw.wave(constraints)
+    def attention_bwd(
+        q: tkl.Memory[M, K1, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        k: tkl.Memory[K2, K1, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        do: tkl.Memory[N, M, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        dv: tkl.Memory[K2, N, GLOBAL_ADDRESS_SPACE, tkl.f32],
+    ):
+        dv_init = tkl.Register[K2, N, tkl.f32](0.0)
+
+        k_j = tkw.read(k, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+        q_i = tkw.read(q, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+
+        s_acc = tkl.Register[M, K2, tkl.f32](0.0)
+        s_ij = tkw.mma(q_i, k_j, s_acc)
+        s_ij = tkw.permute(s_ij, [K2, M])
+
+        do_i = tkw.read(do, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+        dv_j = tkw.mma(tkw.cast(s_ij, tkl.f16), do_i, dv_init)
+            
+        tkw.write(dv_j, dv, elements_per_thread=STORE_ELEMS_PER_THREAD)
+
+    hyperparams = {
+        LOAD_ELEMS_PER_THREAD: get_mfma_load_elems_per_thread(mfma_variant),
+        STORE_ELEMS_PER_THREAD: get_mfma_store_elems_per_thread(mfma_variant),
+        M: q_seq_len,
+        N: v_head_dim,
+        K1: qk_head_dim,
+        K2: kv_seq_len,
+    }
+
+    hyperparams.update(get_default_scheduling_params())
+    config = get_default_run_config()
+    # config["print_ir_after_all"] = True
+    compile_config = {
+        "waves_per_eu": 2,
+        "denorm_fp_math_f32": "preserve-sign",
+        "print_ir_after": ["first", "last", "set_node_indices", "expand_graph"],
+        # "print_ir_before": ["first", "set_node_indices"],
+        "print_signature": True,
+        "print_pretty_mlir": True,
+        "print_indices": True,
+    }
+
+    with tk.gen.TestLaunchContext(
+        hyperparams,
+        canonicalize=True,
+        run=True,
+        run_bench=False,
+        run_config=config,
+        compile_config=compile_config,
+        schedule=False,
+        use_scheduling_barriers=enable_scheduling_barriers,
+    ):
+        
+        torch.manual_seed(0)
+        q = torch.full((q_seq_len, qk_head_dim), 0.1, device=get_default_device(), dtype=torch.float16)
+        k = torch.full((kv_seq_len, qk_head_dim), 0.2, device=get_default_device(), dtype=torch.float16)
+        do = torch.full((q_seq_len, v_head_dim), 0.3, device=get_default_device(), dtype=torch.float16)
+
+        s_ref = torch.matmul(q, k.transpose(-1, -2))
+        dv_ref = torch.matmul(s_ref.transpose(-1, -2), do)
+
+        dv = device_zeros(kv_seq_len, v_head_dim)
+        mb_bwd = attention_bwd(
+            q,
+            k,
+            do.transpose(-1, -2),
+            dv,
+        )
+            
+        if dump_generated_mlir:
+            filename = f"wave_chained_gemm_undistributed_{'x'.join(map(str, shape))}.mlir"
+            with open(filename, "w") as f:
+                f.write(mb_bwd.module_op.get_asm())
+            print(f"IR dumped to {filename}")
+
+        assert_close(dv, dv_ref.to(torch.float32), atol=1e-3, rtol=1e-4)
+
