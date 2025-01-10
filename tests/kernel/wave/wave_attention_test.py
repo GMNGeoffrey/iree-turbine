@@ -1122,118 +1122,6 @@ def get_attention_fwd_kernel(
 
     return attention_fwd, hyperparams
 
-def testReproWriteInLoopBug():
-    mfma_variant = MMAType.F32_16x16x16_F16
-    shape = (16, 32, 16)
-    q_seq_len, qk_head_dim, kv_seq_len = shape
-    M = tkl.sym.M
-    K1 = tkl.sym.K1
-    K2 = tkl.sym.K2
-
-    BLOCK_K2 = tkl.sym.BLOCK_K2
-    ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
-    LOAD_ELEMS_PER_THREAD = tkl.sym.LOAD_ELEMS_PER_THREAD
-    STORE_ELEMS_PER_THREAD = tkl.sym.STORE_ELEMS_PER_THREAD
-
-    # Expose user-constraints
-    constraints: list[tkw.Constraint] = [tkw.WorkgroupConstraint(M, M, 0)]
-    constraints += [tkw.TilingConstraint(K2, BLOCK_K2)]
-
-    constraints += [
-        tkw.HardwareConstraint(
-            threads_per_wave=64,
-            waves_per_block=(1, 1, 1),
-            mma_type=mfma_variant,
-        )
-    ]
-
-    @tkw.wave(constraints)
-    def attention_fwd(
-        q: tkl.Memory[M, K1, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        k: tkl.Memory[K2, K1, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        s: tkl.Memory[M, K2, GLOBAL_ADDRESS_SPACE, tkl.f32],
-        max: tkl.Memory[M, GLOBAL_ADDRESS_SPACE, tkl.f32],
-    ):
-        init_m = tkl.Register[M, tkl.f32](-1e6)
-
-        @tkw.reduction(K2, init_args=[init_m])
-        def repeat(m_prev: tkl.Register[M, tkl.f32]) -> tkl.Register[M, tkl.f32]:
-            s_acc = tkl.Register[K2, M, tkl.f32](0.0)
-            q_i = tkw.read(q, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-            k_j = tkw.read(k, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-            s_ij = tkw.mma(k_j, q_i, s_acc)
-            s_ij = tkw.permute(s_ij, target_shape=[M, K2])
-            tkw.write(s_ij, s, elements_per_thread=STORE_ELEMS_PER_THREAD)
-            m_ij = tkw.max(s_ij, m_prev, dim=K2)
-            return m_ij
-        tkw.write(repeat, max, elements_per_thread=1)
-
-    hyperparams = {
-        ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
-        LOAD_ELEMS_PER_THREAD: 4,
-        STORE_ELEMS_PER_THREAD: 4,
-        BLOCK_K2: 16,
-        M: q_seq_len,
-        K1: qk_head_dim,
-        K2: kv_seq_len,
-    }
-
-    # q = device_randn(batch, q_seq_len, qk_head_dim)
-    q = torch.full((q_seq_len, qk_head_dim), 0.1, device=get_default_device())
-    # q = torch.arange(
-    #     (batch * q_seq_len * qk_head_dim), dtype=torch.float32, device=get_default_device()
-    # ).reshape((batch, q_seq_len, qk_head_dim)) / (batch * q_seq_len * qk_head_dim)
-    # q[0, :, (qk_head_dim//2):] = 0
-
-    # k = device_randn(batch, kv_seq_len, qk_head_dim)
-    k = torch.full((kv_seq_len, qk_head_dim), 0.2, device=get_default_device())
-    # k = torch.arange(
-    #     (batch * kv_seq_len * qk_head_dim), dtype=torch.float32
-    # ).reshape((batch, kv_seq_len, qk_head_dim)) / (batch * kv_seq_len * qk_head_dim)
-    # k[0, :, (qk_head_dim//2):] = 0
-
-    s_ref = torch.matmul(q, k.transpose(-1, -2))
-    m_ref = torch.max(s_ref, dim=-1)[0]
-
-    hyperparams.update(get_default_scheduling_params())
-    config = get_default_run_config()
-    # config["print_ir_after_all"] = True
-    compile_config = {
-        "waves_per_eu": 2,
-        "denorm_fp_math_f32": "preserve-sign",
-        "print_grid": True,
-        "print_ir_after": ["set_node_indices", "first", "last"],
-    }
-
-    with tk.gen.TestLaunchContext(
-        hyperparams,
-        canonicalize=True,
-        run=True,
-        run_bench=False,
-        run_config=config,
-        compile_config=compile_config,
-        schedule=False,
-        use_scheduling_barriers=enable_scheduling_barriers,
-    ):
-        m = device_zeros(q_seq_len)
-        s = device_zeros(q_seq_len, kv_seq_len)
-
-        mb_fwd = attention_fwd(
-            q.to(torch.float16),
-            k.to(torch.float16),
-            s,
-            m
-        )
-        if test_dump_generated_mlir:
-            filename = f"wave_matmul_in_reduction_{'x'.join(map(str, shape))}.mlir"
-            with open(filename, "w") as f:
-                f.write(mb_fwd.module_op.get_asm())
-            print(f"IR dumped to {filename}")
-        
-        assert_close(m, m_ref, atol=5e-2, rtol=1e-2)
-        assert_close(s, s_ref, atol=5e-2, rtol=1e-2)
-
-
 def get_attention_bwd_kernel(
     batch: int,
     kv_seq_len: int,
@@ -1795,7 +1683,7 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
     v = v.to(torch.float16)
     do = do.to(torch.float16)
 
-    attention_fwd, hyperparams = get_attention_fwd_s_only_kernel(
+    attention_fwd, hyperparams = get_attention_fwd_kernel(
         batch=batch,
         kv_seq_len=kv_seq_len,
         qk_head_dim=qk_head_dim,
@@ -1809,8 +1697,8 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
     compile_config = {
         "waves_per_eu": 2,
         "denorm_fp_math_f32": "preserve-sign",
-        "print_grid": True,
-        "print_ir_after": ["set_node_indices", "first", "last"],
+        # "print_grid": True,
+        # "print_ir_after": ["set_node_indices", "first", "last"],
     }
 
     dynamic_symbols = []
@@ -1832,14 +1720,13 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         output = device_zeros(batch, q_seq_len, v_head_dim, dtype=torch.float16)
         lse = device_zeros(batch, q_seq_len, dtype=torch.float16)
         s = device_zeros(batch, q_seq_len, kv_seq_len)
-        # log2e = 1.44269504089
 
         mb_fwd = attention_fwd(
             q,
             k,
-            # v.transpose(-1, -2),
+            v.transpose(-1, -2),
             s,
-            # output,
+            output,
             lse
         )
 
@@ -1849,13 +1736,7 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
                 f.write(mb_fwd.module_op.get_asm())
             print(f"IR dumped to {filename}")
 
-        # print_small_tensor(torch.matmul(k, q.transpose(-1, -2)), "kq")
-        # If K1 is > 16, this somehow ends up being wrong
-        # print_small_tensor(s/s_ref, "s_rat")
-        # print_small_tensor(q, "q")
-        # print_small_tensor(k, "k")
         assert_close(s, s_ref, atol=5e-2, rtol=1e-2)
-        assert False
         # Can't check P, since we don't actually compute the "real" thing and rescale as we go.
 
         assert_close(output, o_ref, atol=5e-2, rtol=1e-2)
@@ -2023,6 +1904,120 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         assert_close(dk, dk_ref, atol=5e-2, rtol=1e-2)
 
         assert_close(dq, dq_ref, atol=5e-2, rtol=1e-2)
+
+
+
+def testReproWriteInLoopBug():
+    mfma_variant = MMAType.F32_16x16x16_F16
+    shape = (16, 32, 16)
+    q_seq_len, qk_head_dim, kv_seq_len = shape
+    M = tkl.sym.M
+    K1 = tkl.sym.K1
+    K2 = tkl.sym.K2
+
+    BLOCK_K2 = tkl.sym.BLOCK_K2
+    ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
+    LOAD_ELEMS_PER_THREAD = tkl.sym.LOAD_ELEMS_PER_THREAD
+    STORE_ELEMS_PER_THREAD = tkl.sym.STORE_ELEMS_PER_THREAD
+
+    # Expose user-constraints
+    constraints: list[tkw.Constraint] = [tkw.WorkgroupConstraint(M, M, 0)]
+    constraints += [tkw.WorkgroupConstraint(K2, K2, 1)]
+    # constraints += [tkw.TilingConstraint(K2, BLOCK_K2)]
+
+    constraints += [
+        tkw.HardwareConstraint(
+            threads_per_wave=64,
+            waves_per_block=(1, 1, 1),
+            mma_type=mfma_variant,
+        )
+    ]
+
+    @tkw.wave(constraints)
+    def attention_fwd(
+        q: tkl.Memory[M, K1, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        k: tkl.Memory[K2, K1, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        s: tkl.Memory[M, K2, GLOBAL_ADDRESS_SPACE, tkl.f32],
+        max: tkl.Memory[M, GLOBAL_ADDRESS_SPACE, tkl.f32],
+    ):
+        init_m = tkl.Register[M, tkl.f32](-1e6)
+
+        # @tkw.reduction(K2, init_args=[init_m])
+        # def repeat(m_prev: tkl.Register[M, tkl.f32]) -> tkl.Register[M, tkl.f32]:
+        s_acc = tkl.Register[K2, M, tkl.f32](0.0)
+        q_i = tkw.read(q, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+        k_j = tkw.read(k, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+        s_ij = tkw.mma(k_j, q_i, s_acc)
+        s_ij = tkw.permute(s_ij, target_shape=[M, K2])
+        tkw.write(s_ij, s, elements_per_thread=STORE_ELEMS_PER_THREAD)
+        m_ij = tkw.max(s_ij, init_m, dim=K2)
+            # return m_ij
+        tkw.write(m_ij, max, elements_per_thread=1)
+
+    hyperparams = {
+        ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
+        LOAD_ELEMS_PER_THREAD: 4,
+        STORE_ELEMS_PER_THREAD: 4,
+        BLOCK_K2: 16,
+        M: q_seq_len,
+        K1: qk_head_dim,
+        K2: kv_seq_len,
+    }
+
+    # q = device_randn(batch, q_seq_len, qk_head_dim)
+    q = torch.full((q_seq_len, qk_head_dim), 0.1, device=get_default_device())
+    # q = torch.arange(
+    #     (batch * q_seq_len * qk_head_dim), dtype=torch.float32, device=get_default_device()
+    # ).reshape((batch, q_seq_len, qk_head_dim)) / (batch * q_seq_len * qk_head_dim)
+    # q[0, :, (qk_head_dim//2):] = 0
+
+    # k = device_randn(batch, kv_seq_len, qk_head_dim)
+    k = torch.full((kv_seq_len, qk_head_dim), 0.2, device=get_default_device())
+    # k = torch.arange(
+    #     (batch * kv_seq_len * qk_head_dim), dtype=torch.float32
+    # ).reshape((batch, kv_seq_len, qk_head_dim)) / (batch * kv_seq_len * qk_head_dim)
+    # k[0, :, (qk_head_dim//2):] = 0
+
+    s_ref = torch.matmul(q, k.transpose(-1, -2))
+    m_ref = torch.max(s_ref, dim=-1)[0]
+
+    hyperparams.update(get_default_scheduling_params())
+    config = get_default_run_config()
+    # config["print_ir_after_all"] = True
+    compile_config = {
+        "waves_per_eu": 2,
+        "denorm_fp_math_f32": "preserve-sign",
+        "print_grid": True,
+        "print_ir_after": ["set_node_indices", "first", "last"],
+    }
+
+    with tk.gen.TestLaunchContext(
+        hyperparams,
+        canonicalize=True,
+        run=True,
+        run_bench=False,
+        run_config=config,
+        compile_config=compile_config,
+        schedule=False,
+        use_scheduling_barriers=enable_scheduling_barriers,
+    ):
+        m = device_zeros(q_seq_len)
+        s = device_zeros(q_seq_len, kv_seq_len)
+
+        mb_fwd = attention_fwd(
+            q.to(torch.float16),
+            k.to(torch.float16),
+            s,
+            m
+        )
+        if test_dump_generated_mlir:
+            filename = f"wave_matmul_in_reduction_{'x'.join(map(str, shape))}.mlir"
+            with open(filename, "w") as f:
+                f.write(mb_fwd.module_op.get_asm())
+            print(f"IR dumped to {filename}")
+        
+        assert_close(m, m_ref, atol=5e-2, rtol=1e-2)
+        assert_close(s, s_ref, atol=5e-2, rtol=1e-2)
 
 
 @require_e2e

@@ -418,7 +418,10 @@ def populate_inputs(
                     node, metadata, dim_scaling, new_nodes_to_expand
                 )
             case ReduceOp():
-                reduction_count = dim_scaling[node.reduction_dim]
+                try:
+                    reduction_count = dim_scaling[node.reduction_dim]
+                except KeyError as e:
+                    raise RuntimeError(f"Reduction dimension {node.reduction_dim} is not in {dim_scaling} for ReduceOp {node}")
                 dim_queries = []
                 for i in range(reduction_count):
                     dim_query = deepcopy(metadata.dim_query)

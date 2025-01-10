@@ -352,7 +352,7 @@ def verify_nodes(trace: CapturedTrace):
         assert custom.index, f"Index not set for node {custom.fx_node}: {custom}"
         assert custom.vector_shapes, f"Vector shapes not set for node {custom.fx_node}: {custom}"
         batchless_index = {k: v for k, v in custom.index.items() if str(k) != "B"}
-        print(f"{custom.fx_node}: {batchless_index}")
+        # print(f"{custom.fx_node}: {batchless_index}")
 
 
 def set_node_indices(trace: CapturedTrace, constraints: list[Constraint]):
