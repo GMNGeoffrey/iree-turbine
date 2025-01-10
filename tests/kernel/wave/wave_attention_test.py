@@ -1698,7 +1698,7 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         "waves_per_eu": 2,
         "denorm_fp_math_f32": "preserve-sign",
         # "print_grid": True,
-        # "print_ir_after": ["set_node_indices", "first", "last"],
+        "print_ir_after": ["set_node_indices", "expand_graph", "first", "last"],
     }
 
     dynamic_symbols = []
@@ -1987,7 +1987,7 @@ def testReproWriteInLoopBug():
         "waves_per_eu": 2,
         "denorm_fp_math_f32": "preserve-sign",
         "print_grid": True,
-        "print_ir_after": ["set_node_indices", "first", "last"],
+        "print_ir_after": ["set_node_indices", "expand_graph", "first", "last"],
     }
 
     with tk.gen.TestLaunchContext(
