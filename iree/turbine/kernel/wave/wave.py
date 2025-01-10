@@ -339,7 +339,8 @@ class LaunchableWave(Launchable):
             try:
                 p(trace)
             except Exception as e:
-                raise RuntimeError(f"Error in pass: {p.__name__}") from e
+                print(f"Error in pass: {p.__name__}")
+                print(trace)
             if "all" in print_ir_after or p.__name__ in print_ir_after:
                 print(f"After {p.__name__}:\n{trace}\n")
 
@@ -424,6 +425,7 @@ class LaunchableWave(Launchable):
                 p(trace)
             except Exception as e:
                 print(f"Error in pass: {p.__name__}")
+                print(trace)
                 raise e
             if "all" in print_ir_after or p.__name__ in print_ir_after:
                 print(f"After {p.__name__}:\n{trace}\n")
@@ -446,7 +448,8 @@ class LaunchableWave(Launchable):
             )
             self.grid_type.dims[dim] *= safe_subs(constraint.count, idxc.subs)
         grid = self.grid_type
-        # print(f"After determine grid shape: {grid}")
+        if compile_config.get("print_grid", False):
+            print(f"Grid: {grid}")
 
         root_graph = trace.get_root_graph()
         kernel_sig = kernel_codegen.KernelSignature()

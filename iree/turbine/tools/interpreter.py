@@ -8,7 +8,6 @@ import numpy as np
 
 logger = get_logger("turbine.wave.interpreter")
 
-
 from ..kernel.compiler.ir import (
     Context,
     F16Type,
@@ -65,7 +64,6 @@ class Interpreter:
             op.operation.parent.name == "func.func"
             or op.operation.parent.name == "scf.for"
         ):
-
             logger.debug(f"Processing operation: {op}")
             value: torch.Tensor = torch.Tensor([])
             match type(op):
@@ -139,7 +137,7 @@ class Interpreter:
                     load_indices = []
                     for index in op.indices:
                         load_indices.append(self.symbol_table[index])
-                    logger.debug("Load indices:", load_indices)
+                    logger.debug("Load indices: %s", load_indices)
                     memref = self.symbol_table[op.base]
                     result_type = op.result.type
                     result_shape = result_type.shape
@@ -306,6 +304,8 @@ class Interpreter:
             module = Module.parse(asm)
             operation = module.operation
             self.walk_operations(operation, self.callback)
+        for op, val in self.symbol_table.items():
+            print(f"{op}: {val}")
 
     @staticmethod
     def interpret_ndrange(
