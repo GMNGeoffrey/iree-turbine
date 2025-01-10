@@ -138,11 +138,11 @@ class CapturedTrace:
     def __str__(self) -> str:
         return self.region_graph.pretty_string(self.root_graph)
 
-    def walk(self, filter: Callable[[fx.Node], bool]) -> list[fx.Node]:
+    def walk(self, filter: Optional[Callable[[fx.Node], bool]] = None) -> list[fx.Node]:
         nodes: list[fx.Node] = []
         for region in self.region_graph.subgraphs.values():
             for node in region.nodes:
-                if filter(node):
+                if filter is None or filter(node):
                     nodes.append(node)
         return nodes
 
