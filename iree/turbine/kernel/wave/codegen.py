@@ -1250,6 +1250,7 @@ def handle_reduction(emitter: WaveEmitter, node: fx.Node):
         # Add mapping for iter args.
         subgraph: fx.Graph = emitter.trace.get_subgraph(subgraph)
         iter_args: list[fx.Node] = get_custom(node).iter_args(subgraph)
+        assert len(iter_args) == len(forOp.inner_iter_args), f"Len of reduction and for op iter args must match, Reduction args: {iter_args}; For Op args: {[a.type for a in forOp.inner_iter_args]}"
         for i, v in enumerate(forOp.inner_iter_args):
             emitter.bind_node_proxy(iter_args[i], IRProxyValue(v))
         captured_vars: list[fx.Node] = get_custom(node).captured_vars(subgraph)
