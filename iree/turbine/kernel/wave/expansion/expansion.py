@@ -57,6 +57,9 @@ class ExpansionInfo:
     node: CustomOp
     indexed_dims: tuple[tuple[IndexSymbol, int], ...]
 
+    def __repr__(self):
+        return f"ExpansionInfo({self.node.fx_node}, {self.indexed_dims})"
+
 
 class ReductionInfo:
     """
@@ -67,7 +70,11 @@ class ReductionInfo:
         self.reduction = reduction
         self.outputs: dict[int, ExpansionInfo] = {}
         self.init_args: dict[int, ExpansionInfo] = {}
-        self.get_results: dict[int, ExpansionInfo] = {}
+        self.get_results: dict[int, CustomOp] = {}
+
+    def __repr__(self):
+        get_results = {i: c.fx_node for i, c in self.get_results.items()}
+        return f"ReductionInfo({self.reduction.fx_node}, outputs={self.outputs}, init_args={self.init_args}, get_results={get_results}" 
 
 
 class ExpansionContext:
@@ -227,8 +234,10 @@ def handle_reduction_entry(
         result_index = compute_result_index(dim_query, dim_scaling, inputs[0], outputs)
         custom = get_custom(inputs[0])
         key = ExpansionInfo(custom, get_indexed_dims(dim_query, custom))
-        reduction_context[reduction].outputs[result_index] = key
-        reduction_context[reduction].get_results[result_index] = new_node
+        reduction_info = reduction_context[reduction]
+        assert result_index not in reduction_info.outputs and result_index not in reduction_info.get_results, f"{result_index=} has already been computed for {reduction_info}"
+        reduction_info.outputs[result_index] = key
+        reduction_info.get_results[result_index] = new_node
 
 
 def handle_reduction_exit(
@@ -664,16 +673,20 @@ def expand_graph(
         logger.warning(f"No leaf operations found in kernel using final operation {final_op}")
     expansion_context = ExpansionContext()
     for custom in leaf_ops:
+        # print(f"Expanding leaf operation {custom.fx_node}")
         for dim_combination in get_dim_combinations(custom, constraints):
+            # print(f"Expanding leaf operation {custom.fx_node} along {dim_combination}")
             dfs(
                 custom,
                 dim_combination,
                 constraints,
                 expansion_context,
             )
+            # print(trace)
     
     # Fixup all reduction nodes.
     fixup_reduction_nodes(trace, expansion_context)
+    # print(f"After fixup_reduction_nodes\n{trace}")
     # Fixup all mma nodes.
     fixup_mma_nodes(trace, expansion_context)
     # Remove original nodes in root graph.

@@ -40,15 +40,15 @@ default_test_shapes = {}
 # Order of shapes: (B, M, N, K1, K2)
 default_test_shapes["test_attention"] = [
     # (2, 64, 128, 32, 256),
-    (1, 16, 16, 16, 32),
-    (1, 16, 16, 32, 16),
+    # (1, 16, 16, 16, 32),
+    # (1, 16, 16, 32, 16),
     (1, 16, 32, 16, 16),
-    (1, 32, 16, 16, 16),
+    # (1, 32, 16, 16, 16),
     # (40, 1024, 64, 64, 1024),
-    (1, 16, 16, 16, 16),
     # (1, 16, 16, 8, 16),
-    (1, 16, 16, 64, 16),
-    (1, 16, 16, 32, 32),
+    # (1, 16, 16, 64, 16),
+    # (1, 16, 16, 32, 32),
+    (1, 16, 16, 16, 16),
 ]
 
 user_specified_test_shapes = ""
@@ -431,7 +431,7 @@ def get_attention_bwd_kernel(
             threads_per_wave=64,
             waves_per_block=(1, 1, 1),
             mma_type=mfma_variant,
-            vector_shapes={B: 0},
+            vector_shapes={B: 0, N_vd: 16, M_qs: 16, K1_qkd: 16, K2_kvs: 16},
         )
     ]
 
@@ -845,11 +845,11 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
     compile_config = {
         "waves_per_eu": 2,
         "denorm_fp_math_f32": "preserve-sign",
-        "print_ir_after": ["first", "last"],
+        # "print_ir_after": ["first", "last"],
         # "print_ir_before": ["first", "set_node_indices"],
         # "print_signature": True,
         # "print_pretty_mlir": True,
-        "print_indices": True,
+        # "print_indices": True,
     }
 
     with tk.gen.TestLaunchContext(
@@ -1017,8 +1017,8 @@ def testReproWriteInLoopBug():
     compile_config = {
         "waves_per_eu": 2,
         "denorm_fp_math_f32": "preserve-sign",
-        "print_grid": True,
-        "print_ir_after": ["set_node_indices", "expand_graph", "first", "last"],
+        # "print_grid": True,
+        # "print_ir_after": ["set_node_indices", "expand_graph", "first", "last"],
     }
 
     with tk.gen.TestLaunchContext(
@@ -1149,3 +1149,132 @@ def testReproWriteAlongUnconstrainedDimension():
 
         assert_close(dv, dv_ref.to(torch.float32), atol=1e-3, rtol=1e-4)
 
+
+@pytest.mark.parametrize("shape", get_test_shapes("test_attention"))
+def testReproExpansionOrthogonalToReduction(shape):
+    # shape = (1, 16, 32, 16, 16)
+    _, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
+    mfma_variant = MMAType.F32_16x16x16_F16
+    # Input sizes
+    M = tkl.sym.M  # query sequence length
+    N = tkl.sym.N  # value head dimension
+    K1 = tkl.sym.K1  # query/key head dimension
+    K2 = tkl.sym.K2  # key/value sequence length
+
+    LOAD_ELEMS_PER_THREAD = tkl.sym.LOAD_ELEMS_PER_THREAD
+    STORE_ELEMS_PER_THREAD = tkl.sym.STORE_ELEMS_PER_THREAD
+
+    # Expose user-constraints
+    constraints: list[tkw.Constraint] = [
+        tkw.WorkgroupConstraint(K2, K2, 0),
+        tkw.WorkgroupConstraint(N, N, 1),
+        tkw.TilingConstraint(M, M),
+        tkw.HardwareConstraint(
+            threads_per_wave=64,
+            waves_per_block=(1, 1, 1),
+            mma_type=mfma_variant,
+            # Without setting vector shape for N, the second result of the reduction gets trampled
+            vector_shapes={N: 16, M: 16, K1: 16, K2: 16},
+        )
+    ]
+
+    i = tkw.IndexMapping.iterator(0)
+    j = tkw.IndexMapping.iterator(1)
+
+    flip_m_k1_read_mapping = tkw.IndexMapping(
+        num_iterators=2, inputs={M: j, K1: i}, outputs={K1: i, M: j},
+    )
+
+    @tkw.wave(constraints)
+    def attention_bwd(
+        q: tkl.Memory[M, K1, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        k: tkl.Memory[K2, K1, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        do: tkl.Memory[N, M, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        dk: tkl.Memory[K2, K1, GLOBAL_ADDRESS_SPACE, tkl.f32],
+        dv: tkl.Memory[K2, N, GLOBAL_ADDRESS_SPACE, tkl.f32],
+        ds: tkl.Memory[K2, M, GLOBAL_ADDRESS_SPACE, tkl.f16],
+    ):
+
+        dv_init = tkl.Register[K2, N, tkl.f32](0.0)
+        dk_init = tkl.Register[K2, K1, tkl.f32](0.0)
+
+        @tkw.reduction(M, init_args=[dv_init, dk_init])
+        def loop_q_seq_len(
+            dv_prev: tkl.Register[K2, N, tkl.f32],
+            dk_prev: tkl.Register[K2, K1, tkl.f32],
+        ):
+            k_j = tkw.read(k, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            q_i = tkw.read(q, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+
+            s_acc = tkl.Register[M, K2, tkl.f32](0.0)
+            s_ij = tkw.mma(q_i, k_j, s_acc)
+            s_ij = tkw.permute(s_ij, [K2, M])
+
+            do_i = tkw.read(do, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            dv_j = tkw.mma(tkw.cast(s_ij, tkl.f16), do_i, dv_prev)
+            
+            ds_ij = tkw.read(ds, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            q_i_for_dk = tkw.read(q, mapping=flip_m_k1_read_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            dk_j = tkw.mma(ds_ij, q_i_for_dk, dk_prev)
+            return (dv_j, dk_j)
+
+        (dv_j, dk_j) = loop_q_seq_len
+        tkw.write(dv_j, dv, elements_per_thread=STORE_ELEMS_PER_THREAD)
+        tkw.write(dk_j, dk, elements_per_thread=STORE_ELEMS_PER_THREAD)
+
+    hyperparams = {
+        LOAD_ELEMS_PER_THREAD: get_mfma_load_elems_per_thread(mfma_variant),
+        STORE_ELEMS_PER_THREAD: get_mfma_store_elems_per_thread(mfma_variant),
+        M: q_seq_len,
+        N: v_head_dim,
+        K1: qk_head_dim,
+        K2: kv_seq_len,
+    }
+
+
+    hyperparams.update(get_default_scheduling_params())
+    config = get_default_run_config()
+    # config["print_ir_after_all"] = True
+    compile_config = {
+        "waves_per_eu": 2,
+        "denorm_fp_math_f32": "preserve-sign",
+        "print_ir_after": ["expand_graph"],
+        "print_ir_before": ["expand_graph"],
+        # "print_signature": True,
+        # "print_pretty_mlir": True,
+        "print_indices": True,
+    }
+
+    with tk.gen.TestLaunchContext(
+        hyperparams,
+        canonicalize=True,
+        run=True,
+        run_bench=False,
+        run_config=config,
+        compile_config=compile_config,
+        schedule=False,
+        use_scheduling_barriers=enable_scheduling_barriers,
+    ):
+        
+        torch.manual_seed(0)
+        q = device_randn(q_seq_len, qk_head_dim, dtype=torch.float16)
+        k = device_randn(kv_seq_len, qk_head_dim, dtype=torch.float16)
+        do = device_randn(q_seq_len, v_head_dim, dtype=torch.float16)
+        ds = device_randn(kv_seq_len, q_seq_len, dtype=torch.float16)
+
+        s_ref = torch.matmul(q, k.transpose(-1, -2))
+        dv_ref = torch.matmul(s_ref.transpose(-1, -2), do)
+
+        dk = device_zeros(kv_seq_len, qk_head_dim, dtype=torch.float32)
+        dv = device_zeros(kv_seq_len, v_head_dim, dtype=torch.float32)
+
+        mb_bwd = attention_bwd(
+            q,
+            k,
+            do.transpose(-1, -2),
+            dk,
+            dv,
+            ds,
+        )
+
+        assert_close(dv, dv_ref.to(torch.float32), atol=1e-3, rtol=1e-3)

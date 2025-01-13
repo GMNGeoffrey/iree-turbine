@@ -373,6 +373,12 @@ class LaunchableWave(Launchable):
             curry_constraints(promote_placeholders),
             # Set indices.
             curry_constraints(set_node_indices),
+        ]
+
+        if compile_config.get("print_indices", False):
+            graph_passes.append(print_node_indices)
+
+        graph_passes += [
             # Expansion
             curry_constraints(expand_graph),
             # Set post expansion indices.
@@ -436,10 +442,6 @@ class LaunchableWave(Launchable):
             # Take advantage of Python leaking loop variables
             print(f"After final pass {p.__name__}:\n{trace}\n")
 
-        if compile_config.get("print_indices", False):
-            print("Indices for all nodes:")
-            print_node_indices(trace)
-            print()
 
         # Determine grid shape.
         self.grid_type.dims = [1, 1, 1]
@@ -494,13 +496,13 @@ class LaunchableWave(Launchable):
             llvm_func_config,
         )
 
-        print("\n***Emitting IR***")
+        # print("\n***Emitting IR***")
         emitter = WaveEmitter(
             dispatch_entrypoint, trace, self.constraints, dynamic_symbols
         )
         emitter.emit(trace.get_root_graph())
-        pretty = '\n'.join(f"{k}: {v}" for k, v in emitter.root_sig._bindings_by_reference.items())
-        print(pretty)
+        # pretty = '\n'.join(f"{k}: {v}" for k, v in emitter.root_sig._bindings_by_reference.items())
+        # print(pretty)
         emitter.finish()
 
         if kwargs.get("canonicalize", False):

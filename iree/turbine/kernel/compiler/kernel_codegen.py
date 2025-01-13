@@ -331,7 +331,7 @@ class BoundKernelSignature(ABC):
         }
 
     def resolve_by_reference(self, reference: Any) -> Value:
-        print(f"Looking up {reference}")
+        # print(f"Looking up {reference}")
         try:
             binding = self._bindings_by_reference[reference]
         except KeyError:

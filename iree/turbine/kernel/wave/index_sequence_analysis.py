@@ -354,9 +354,11 @@ def verify_nodes(trace: CapturedTrace):
 
 
 def print_node_indices(trace: CapturedTrace):
+    print("Indices for all nodes:")
     for node in trace.walk():
         custom = get_custom(node)
-        print(f"{custom.fx_node}: {custom.index}")
+        print(f"{custom.fx_node}: {custom.index}, {custom.vector_shapes}")
+    print()
 
 def set_node_indices(trace: CapturedTrace, constraints: list[Constraint]):
     mma_index = get_mma_dimensional_mapping(trace, get_hardware_constraint(constraints))

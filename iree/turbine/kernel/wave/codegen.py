@@ -147,7 +147,7 @@ class WaveEmitter:
     def _emit_graph(self, graph: fx.Graph):
         """Emits the given graph at the current insertion point."""
         for node in graph.nodes:
-            print(f"Emitting {node}")
+            # print(f"Emitting {node}")
             if str(node) in ["mma_K2:0_K1:0_M:0", "mma_K2:0_K1:0_M:0"]:
                 pass
             if node.op == "call_function" or node.op == "call_method":
