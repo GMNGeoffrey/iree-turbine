@@ -147,6 +147,9 @@ class WaveEmitter:
     def _emit_graph(self, graph: fx.Graph):
         """Emits the given graph at the current insertion point."""
         for node in graph.nodes:
+            print(f"Emitting {node}")
+            if str(node) in ["mma_K2:0_K1:0_M:0", "mma_K2:0_K1:0_M:0"]:
+                pass
             if node.op == "call_function" or node.op == "call_method":
                 self._emit_function_call_node(node)
             if node.op == "output":
@@ -163,6 +166,9 @@ class WaveEmitter:
 
     def lookup_node_values(self, node: fx.Node) -> List[Value]:
         assert NDEBUG or isinstance(node, fx.Node)
+        indexed_nodes = list(self._node_values.keys())
+        if str(node) == "dk_K2:0_K1:0_M:0":
+            pass
         values = self._node_values.get(node)
         if values is None:
             values = [self.root_sig.resolve_by_reference(("node", node))]
@@ -173,6 +179,8 @@ class WaveEmitter:
     def bind_node_proxy(self, node: fx.Node, proxy: IRProxyValue):
         """Binds a node's result to a Python/IR proxy object."""
         assert NDEBUG or (isinstance(node, fx.Node) and isinstance(proxy, IRProxyValue))
+        if str(node) == "dk_K2:0_K1:0_M:0":
+            pass
         self._node_values[node] = [proxy]
 
     def bind_node_proxies(self, node: fx.Node, proxies: List[IRProxyValue]):
@@ -180,6 +188,8 @@ class WaveEmitter:
             isinstance(node, fx.Node)
             and all(isinstance(p, IRProxyValue) for p in proxies)
         )
+        if str(node) == "dk_K2:0_K1:0_M:0":
+            pass
         self._node_values[node] = proxies
 
     def get_induction_vars_and_syms(self) -> tuple[list[OpResult], list[IndexExpr]]:

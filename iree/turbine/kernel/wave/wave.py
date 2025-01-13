@@ -321,7 +321,7 @@ class LaunchableWave(Launchable):
         print_ir_before = compile_config.get("print_ir_before", [])
 
         # Trace the function.
-        # print(f"Tracing kernel {self._name}")
+        print(f"\n***Tracing kernel {self._name}***")
         trace = self._trace()
         if "all" in print_ir_after or "all" in print_ir_before or "trace" in print_ir_after or "first" in print_ir_before:
             print(f"After trace/Before first pass:\n{trace}\n")
@@ -437,7 +437,9 @@ class LaunchableWave(Launchable):
             print(f"After final pass {p.__name__}:\n{trace}\n")
 
         if compile_config.get("print_indices", False):
+            print("Indices for all nodes:")
             print_node_indices(trace)
+            print()
 
         # Determine grid shape.
         self.grid_type.dims = [1, 1, 1]
@@ -492,10 +494,13 @@ class LaunchableWave(Launchable):
             llvm_func_config,
         )
 
+        print("\n***Emitting IR***")
         emitter = WaveEmitter(
             dispatch_entrypoint, trace, self.constraints, dynamic_symbols
         )
         emitter.emit(trace.get_root_graph())
+        pretty = '\n'.join(f"{k}: {v}" for k, v in emitter.root_sig._bindings_by_reference.items())
+        print(pretty)
         emitter.finish()
 
         if kwargs.get("canonicalize", False):

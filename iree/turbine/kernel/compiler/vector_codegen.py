@@ -99,7 +99,6 @@ class NodeAttrs:
     def store(self, node: fx.Node):
         node.meta["unsigned"] = self.unsigned
 
-
 class ThreadEmitter:
     """Emits a 'thread function' as a `func` with a signature derived from the gm."""
 
@@ -117,6 +116,8 @@ class ThreadEmitter:
         values = self._node_values.get(node)
         if values is None:
             values = [self._root_sig.resolve_by_reference(("node", node))]
+            if str(node) == "dk_K2:0_K1:0_M:0":
+                pass
             self._node_values[node] = values
         return values
 
@@ -143,6 +144,8 @@ class ThreadEmitter:
         ), f"Cannot rebind node {node}: already bound"
         if attrs is not None:
             attrs.store(node)
+        if str(node) == "dk_K2:0_K1:0_M:0":
+            pass
         self._node_values[node] = [proxy]
 
     def bind_node_proxies(
@@ -162,6 +165,8 @@ class ThreadEmitter:
         ), f"Cannot rebind node {node}: already bound"
         if attrs is not None:
             attrs.store(node)
+        if str(node) == "dk_K2:0_K1:0_M:0":
+            pass
         self._node_values[node] = proxies
 
     def emit(self):
@@ -192,6 +197,8 @@ class ThreadEmitter:
             implicit_capture
         ), f"Expected {len(freevars)} implicit capture args, got {len(implicit_capture)}"
         for freevar, arg in zip(freevars, implicit_capture):
+            if str(freevar.node) == "dk_K2:0_K1:0_M:0":
+                pass
             self._node_values[freevar.node] = self.lookup_node_values(arg)
 
         # Emit subgraph
@@ -789,16 +796,17 @@ def cast_py_value(
     If the value is a constant, a constant value will be built for it.
     """
     if isinstance(value, fx.Node):
-        try:
-            node_values = emitter.lookup_node_values(value)
-            assert len(node_values) == 1, f"Expected exactly one value for node {value}"
-            return (
-                node_values[0]
-                if isinstance(node_values[0], IRProxyValue)
-                else IRProxyValue(node_values[0])
-            )
-        except KeyError:
-            raise CodegenError(f"Producer node `{value}` has no IR Value")
+        # try:
+        node_values = emitter.lookup_node_values(value)
+        # except KeyError:
+        #     # print(f"{emitter._node_values=}")
+        #     raise CodegenError(f"Producer node `{value}` has no IR Value")
+        assert len(node_values) == 1, f"Expected exactly one value for node {value}"
+        return (
+            node_values[0]
+            if isinstance(node_values[0], IRProxyValue)
+            else IRProxyValue(node_values[0])
+        )
     elif isinstance(value, IndexExpr):
         simplified = IndexingContext.current().simplify_expr(value)
         try:

@@ -331,7 +331,12 @@ class BoundKernelSignature(ABC):
         }
 
     def resolve_by_reference(self, reference: Any) -> Value:
-        binding = self._bindings_by_reference[reference]
+        print(f"Looking up {reference}")
+        try:
+            binding = self._bindings_by_reference[reference]
+        except KeyError:
+            pretty = '\n'.join(f"{k}: {v}" for k, v in self._bindings_by_reference.items())
+            raise CodegenError(f"{reference} not in signature:\n{pretty}")
         return self.resolve(binding)
 
     @abstractmethod

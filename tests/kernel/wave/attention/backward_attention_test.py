@@ -192,14 +192,14 @@ def attention_bwd_loops(
     assert dv.shape == (B, K2_kvs, N_vd)
 
     # ensure we have different shapes so we get errors if there are mismatches.
-    # if M_qs == K2_kvs:
-    #     BLOCK_M_Br = M_qs // 4
-    #     BLOCK_K2_Bc = K2_kvs // 2
-    # else:
-    #     BLOCK_M_Br = M_qs // 2
-    #     BLOCK_K2_Bc = K2_kvs // 2
-    BLOCK_M_Br = 8
-    BLOCK_K2_Bc = 4
+    if M_qs == K2_kvs:
+        BLOCK_M_Br = M_qs // 4
+        BLOCK_K2_Bc = K2_kvs // 2
+    else:
+        BLOCK_M_Br = M_qs // 2
+        BLOCK_K2_Bc = K2_kvs // 2
+    # BLOCK_M_Br = 8
+    # BLOCK_K2_Bc = 4
 
     assert M_qs % BLOCK_M_Br == 0
     assert K2_kvs % BLOCK_K2_Bc == 0
@@ -416,9 +416,16 @@ def get_attention_bwd_kernel(
 
     # Expose user-constraints
     constraints: list[tkw.Constraint] = [
-        tkw.WorkgroupConstraint(B, BLOCK_B, 0),
-        tkw.WorkgroupConstraint(K2_kvs, BLOCK_K2, 1),
-        tkw.WorkgroupConstraint(K1_qkd, K1_qkd, 2),
+        tkw.WorkgroupConstraint(K2_kvs, BLOCK_K2, 0),
+        # Degenerate distribution seems to fix some bugs
+        tkw.WorkgroupConstraint(K1_qkd, K1_qkd, 1),
+        # This one causes some other weird compilation error though...
+        tkw.WorkgroupConstraint(N_vd, N_vd, 2),
+        # Can only have 3 dimensions distributed in actual blocks or the
+        # compiler tries to index to far into waves_per_block (and if that is
+        # made longer there's just a fatal crash), so batch dimension needs to
+        # be last.
+        tkw.WorkgroupConstraint(B, BLOCK_B, 3),
         tkw.TilingConstraint(M_qs, BLOCK_M),
         tkw.HardwareConstraint(
             threads_per_wave=64,
@@ -434,10 +441,10 @@ def get_attention_bwd_kernel(
     flip_k2_m_write_mapping = tkw.IndexMapping(
         num_iterators=3, inputs={B: i, K2_kvs: j, M_qs: k}, outputs={B: i, M_qs: k, K2_kvs: j}
     )
-    flip_n_m_write_mapping = tkw.IndexMapping(
-        num_iterators=3, inputs={B: i, N_vd: k, M_qs: j}, outputs={B: i, M_qs: j, N_vd: k}
-    )
 
+    flip_m_n_read_mapping = tkw.IndexMapping(
+        num_iterators=3, inputs={B: i, M_qs: k, N_vd: j}, outputs={B: i, N_vd: j, M_qs: k}
+    )
     flip_m_k1_read_mapping = tkw.IndexMapping(
         num_iterators=3, inputs={B: i, M_qs: k, K1_qkd: j}, outputs={B: i, K1_qkd: j, M_qs: k},
     )
@@ -454,7 +461,7 @@ def get_attention_bwd_kernel(
         q: tkl.Memory[B, M_qs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         k: tkl.Memory[B, K2_kvs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         v: tkl.Memory[B, K2_kvs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        do: tkl.Memory[B, N_vd, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        do: tkl.Memory[B, M_qs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         # This has to be loaded in this way or set_node_indices fails with resolving thread shapes
         lse: tkl.Memory[B, K2_kvs, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         D: tkl.Memory[B, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
@@ -486,18 +493,17 @@ def get_attention_bwd_kernel(
             log2e = tkl.Register[B, M_qs, K2_kvs, tkl.f16](1.44269504089)
             s_ij = tkw.mma(q_i, k_j, s_acc)
             tkw.write(s_ij, s, elements_per_thread=STORE_ELEMS_PER_THREAD)
-            s_ij = tkw.permute(s_ij, [B, M_qs, K2_kvs])
             s_ij = tkw.permute(s_ij, [B, K2_kvs, M_qs])
             lse_i = tkw.read(lse, elements_per_thread=LOAD_ELEMS_PER_THREAD)
             p_ij = tkw.exp2(log2e * (tkw.cast(s_ij, tkl.f16) - lse_i))
             tkw.write(p_ij, p, mapping=flip_k2_m_write_mapping, elements_per_thread=STORE_ELEMS_PER_THREAD)
 
-            do_i_for_dv = tkw.read(do, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            do_i_for_dv = tkw.read(do, mapping=flip_m_n_read_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
             dv_j = tkw.mma(p_ij, do_i_for_dv, dv_prev)
             
             v_j = tkw.read(v, elements_per_thread=LOAD_ELEMS_PER_THREAD)
             # This has to be loaded separately so we have N last
-            do_i_for_dp = tkw.read(do, mapping=flip_n_m_write_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            do_i_for_dp = tkw.read(do, elements_per_thread=LOAD_ELEMS_PER_THREAD)
             dp_acc = tkl.Register[B, K2_kvs, M_qs, tkl.f32](0.0)
             dp_ij = tkw.mma(v_j, do_i_for_dp, dp_acc)
             dp_ij = tkw.permute(dp_ij, [B, M_qs, K2_kvs])
@@ -839,11 +845,11 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
     compile_config = {
         "waves_per_eu": 2,
         "denorm_fp_math_f32": "preserve-sign",
-        # "print_ir_after": ["first", "last"],
+        "print_ir_after": ["first", "last"],
         # "print_ir_before": ["first", "set_node_indices"],
         # "print_signature": True,
         # "print_pretty_mlir": True,
-        # "print_indices": True,
+        "print_indices": True,
     }
 
     with tk.gen.TestLaunchContext(
@@ -889,7 +895,7 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
             q,
             k,
             v,
-            do.transpose(-1, -2),
+            do,
             expanded_lse.transpose(-1, -2),
             D,
             dq,
@@ -914,31 +920,6 @@ def testAttentionMine(shape: tuple[int], mfma_variant: MMAType, request):
         assert_close(v, v_orig.to(torch.float16))
         assert_close(do, do_orig.to(torch.float16))
 
-        # assert_close(s, s_ref, atol=5e-2, rtol=1e-2)
-        # s_minus_l_ref = s_ref - expanded_lse
-        # print_small_tensor(s_ref, "s_ref")
-        # print_small_tensor(lse)
-        # print_small_tensor(s_minus_l_ref, "s_minus_l_ref")
-        # print_small_tensor(s_minus_l, "s_minus_l")
-        # implied_lse = s_ref - s_minus_l
-        # print_small_tensor(implied_lse, "implied_lse")
-        # for row in implied_lse.squeeze():
-        #     lse_used = []
-        #     for implied_lse_entry in row.tolist():
-        #         found_close = None
-        #         for i, lse_entry in enumerate(lse.squeeze()):
-        #             if abs(implied_lse_entry - lse_entry) <= 1e-2 + 1e-4*lse_entry:
-        #                 if found_close is not None:
-        #                     print(f"Found multiple matches for {implied_lse_entry}")
-        #                 found_close = i
-        #         if found_close is None:
-        #             print(f"Didn't find a match for {implied_lse_entry}")
-        #         lse_used.append(found_close)
-        #     print(" ".join([f"{d:2}" for d in lse_used]))
-        # assert_close(s_minus_l, s_minus_l_ref, atol=5e-2, rtol=1e-2)
-        # for row in p.isclose(p_ref, atol=5e-2, rtol=1e-2).squeeze():
-        #     print(" ".join(["T" if i else "F" for i in row.tolist()]))
-        # assert_close(p, p_ref, atol=5e-2, rtol=1e-2)
         assert_close(dv, dv_ref, atol=5e-2, rtol=1e-2)
 
         assert_close(dp, dp_ref, atol=5e-2, rtol=1e-2)
