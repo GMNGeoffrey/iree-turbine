@@ -68,51 +68,6 @@ def get_test_shapes(test_name: str) -> list[tuple[int]]:
     return [pytest.param(s, id="x".join(map(str, s))) for s in test_shapes]
 
 
-def small_tensor_string(t, name="", print_limit=512, min_important_value=5e-2):
-    print_limit = 512
-    if t.shape.numel() > print_limit:
-        return f"{t}"
-    shape = "x".join([str(i) for i in t.shape])
-
-    abs = torch.abs(t)
-    print_mode = "reg"
-    
-    # Things large enough that we can't round them off to zero and small enough
-    # that we need scientific notation to print them or if anything's big enough
-    # that we need scientific notation.
-    if torch.any(torch.logical_and(abs > min_important_value, abs < 1e-3)) or torch.max(abs) > 1e3:
-        print_mode = "sci"
-
-
-    width = max(
-        len(f"{d: .3f}" if print_mode == "reg" else f"{d: .2e}")
-        for d in t.flatten().tolist()
-    )
-
-    if len(t.shape) > 2:
-        t = t.squeeze()
-    if len(t.shape) < 2:
-        t = t.unsqueeze(0)
-    if len(t.shape) > 2:
-        return f"{t}" # Can't print this nicely
-    
-    rows = []
-    for row in t:
-        rows.append(
-            " ".join(
-                f"{d: {width}.3f}" if print_mode == "reg" else f"{d: {width}.2e}"
-                for d in row.tolist()
-            )
-        )
-
-    nl = "\n"
-    return f"\n{name}[{shape}], {t.dtype}:\n{nl.join(rows)}\n"
-
-
-def print_small_tensor(t, *args, **kwargs):
-    print(small_tensor_string(t, *args, **kwargs))
-
-
 def attention_fwd_loops(q, k, v, o, lse):
     B, M_qs, K1_qkd = q.shape
     _, K2_kvs, _ = k.shape
@@ -283,18 +238,16 @@ def get_attention_fwd_kernel(
     constraints += [tkw.WaveConstraint(B, BLOCK_B / WAVES_PER_BLOCK_B)]
 
     if mfma_variant == MMAType.F32_16x16x16_F16:
-        Mvec = 16
-        Nvec = 16
+        vec_size = 16
     if mfma_variant == MMAType.F32_32x32x8_F16:
-        Mvec = 32
-        Nvec = 32
+        vec_size = 32
 
     constraints += [
         tkw.HardwareConstraint(
             threads_per_wave=64,
             waves_per_block=(WAVES_PER_BLOCK_M, WAVES_PER_BLOCK_N, WAVES_PER_BLOCK_B),
             mma_type=mfma_variant,
-            vector_shapes={B: 0, M_qs: Mvec, N_vd: Nvec},
+            vector_shapes={B: 0, M_qs: vec_size, N_vd: vec_size},
         )
     ]
 
@@ -304,9 +257,6 @@ def get_attention_fwd_kernel(
     o_mapping = tkw.IndexMapping(
         num_iterators=3, inputs={B: i, N_vd: j, M_qs: k}, outputs={B: i, M_qs: k, N_vd: j}
     )
-
-    s_mapping = tkw.IndexMapping(num_iterators=3, inputs={B: i, K2_kvs: j, M_qs: k}, outputs={B: i, M_qs: k, K2_kvs: j})
-    
 
     # TODO: tune address space
     @tkw.wave(constraints)
@@ -327,27 +277,15 @@ def get_attention_fwd_kernel(
             m_prev: tkl.Register[B, M_qs, tkl.f32],
             l_prev: tkl.Register[B, M_qs, tkl.f32],
             o_prev: tkl.Register[B, N_vd, M_qs, tkl.f32],
-            # Having this get passed through every time appears to be the only
-            # way to make it accessible inside the loop but have the read be
-            # outside, which I think is clearer since it isn't dependent on the
-            # induction variable. Unsure what it does to the codegen.
-            # Unfortunately, it creates a compilation failure except when
-            # there's only one block.
-            # q_i: tkl.Register[B, M, K1, tkl.f16],
         ) -> tuple[
             tkl.Register[B, M_qs, tkl.f32],
             tkl.Register[B, M_qs, tkl.f32],
             tkl.Register[B, N_vd, M_qs, tkl.f32],
-            # tkl.Register[B, M, K1, tkl.f16],
         ]:
             s_acc = tkl.Register[B, K2_kvs, M_qs, tkl.f32](0.0)
             log2e = tkl.Register[B, M_qs, tkl.f32](1.44269504089)
             q_i = tkw.read(q, elements_per_thread=LOAD_ELEMS_PER_THREAD)
             k_j = tkw.read(k, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-            # I don't really understand why we have to compute the transpose and
-            # then transpose it, but apparently we do, otherwise the compiler
-            # complains in set_node_indices about being unable to resolve thread
-            # shape discrepancies when neither of the shapes is 1.
             s_ij = tkw.mma(k_j, q_i, s_acc)
             s_ij = tkw.permute(s_ij, target_shape=[B, M_qs, K2_kvs])
             tkw.write(s_ij, s, elements_per_thread=STORE_ELEMS_PER_THREAD)
@@ -359,7 +297,7 @@ def get_attention_fwd_kernel(
             v_j = tkw.read(v, elements_per_thread=LOAD_ELEMS_PER_THREAD)
             o_init = e_delta_max * o_prev
             o_ij = tkw.mma(v_j, tkw.cast(p_ij, tkl.f16), o_init)
-            return m_ij, l_ij, o_ij  # , q_i
+            return m_ij, l_ij, o_ij
 
         log2e = tkl.Register[B, M_qs, tkl.f32](1.44269504089)
         m_i, l_i, o_i = repeat
@@ -378,9 +316,9 @@ def get_attention_fwd_kernel(
         LOAD_ELEMS_PER_THREAD: get_mfma_load_elems_per_thread(mfma_variant),
         STORE_ELEMS_PER_THREAD: get_mfma_store_elems_per_thread(mfma_variant),
         BLOCK_B: 1,
-        BLOCK_M_r_qs: 16,
-        BLOCK_N_vd: 16,
-        BLOCK_K2_c_kvs: 16,
+        BLOCK_M_r_qs: vec_size,
+        BLOCK_N_vd: vec_size,
+        BLOCK_K2_c_kvs: vec_size,
         B: batch,
         M_qs: q_seq_len,
         N_vd: v_head_dim,
