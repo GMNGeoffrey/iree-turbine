@@ -1286,3 +1286,193 @@ def testReproExpansionOrthogonalToReduction(shape):
         )
 
         assert_close(dv, dv_ref.to(torch.float32), atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize(
+    "mfma_variant",
+    [
+        MMAType.F32_16x16x16_F16,
+        MMAType.F32_32x32x8_F16,
+    ],
+)
+def testReproNonSquareMMAWithElementwise(mfma_variant):
+    shape = (1, 32, 32, 32, 32)
+    batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
+    # Input sizes
+    B = tkl.sym.B  # batch
+    M_qs = tkl.sym.M  # query sequence length
+    N_vd = tkl.sym.N  # value head dimension
+    K1_qkd = tkl.sym.K1  # query/key head dimension
+    K2_kvs = tkl.sym.K2  # key/value sequence length
+
+    # Workgroup tile sizes
+    BLOCK_B = tkl.sym.BLOCK_B
+    BLOCK_M = tkl.sym.BLOCK_M
+    BLOCK_K2 = tkl.sym.BLOCK_K2
+    # Address space (for GPU, shared(1) or global(0))
+    ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
+    # Other hyperparameters
+    MFMA_INPUT_ELS = tkl.sym.LOAD_ELEMS_PER_THREAD
+    MFMA_OUTPUT_ELS = tkl.sym.STORE_ELEMS_PER_THREAD
+
+    if mfma_variant == MMAType.F32_16x16x16_F16:
+        vec_size = 16
+    elif mfma_variant == MMAType.F32_32x32x8_F16:
+        vec_size = 32
+
+    # Expose user-constraints
+    constraints: list[tkw.Constraint] = [
+        tkw.WorkgroupConstraint(K2_kvs, BLOCK_K2, 0),
+        # Degenerate distribution seems to fix some bugs
+        tkw.WorkgroupConstraint(K1_qkd, K1_qkd, 1),
+        tkw.WorkgroupConstraint(N_vd, N_vd, 2),
+        # Can only have 3 dimensions distributed in actual blocks or the
+        # compiler tries to index too far into waves_per_block (and if that is
+        # made longer there's just a fatal crash), so batch dimension needs to
+        # be last.
+        tkw.WorkgroupConstraint(B, BLOCK_B, 3),
+        tkw.TilingConstraint(M_qs, BLOCK_M),
+        tkw.HardwareConstraint(
+            threads_per_wave=64,
+            waves_per_block=(1, 1, 1),
+            mma_type=mfma_variant,
+            vector_shapes={B: 0, N_vd: vec_size, K2_kvs: vec_size}, #M_qs: vec_size, , K2_kvs: vec_size},
+        )
+    ]
+
+    i = tkw.IndexMapping.iterator(0)
+    j = tkw.IndexMapping.iterator(1)
+    k = tkw.IndexMapping.iterator(2)
+    flip_k2_m_write_mapping = tkw.IndexMapping(
+        num_iterators=3, inputs={B: i, K2_kvs: j, M_qs: k}, outputs={B: i, M_qs: k, K2_kvs: j}
+    )
+
+    flip_m_n_read_mapping = tkw.IndexMapping(
+        num_iterators=3, inputs={B: i, M_qs: k, N_vd: j}, outputs={B: i, N_vd: j, M_qs: k}
+    )
+
+
+    @tkw.wave(constraints)
+    def attention_bwd(
+        q: tkl.Memory[B, M_qs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        k: tkl.Memory[B, K2_kvs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        do: tkl.Memory[B, M_qs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # This has to be loaded in this way or set_node_indices fails with resolving thread shapes
+        lse: tkl.Memory[B, K2_kvs, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        dv: tkl.Memory[B, K2_kvs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        s: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
+        p: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+    ):
+
+        dv_init = tkl.Register[B, K2_kvs, N_vd, tkl.f32](0.0)
+
+        @tkw.reduction(M_qs, init_args=[dv_init])
+        def loop_q_seq_len(dv_prev: tkl.Register[B, K2_kvs, N_vd, tkl.f32]):
+            k_j_for_s = tkw.read(k, elements_per_thread=MFMA_INPUT_ELS)
+            q_i_for_s = tkw.read(q, elements_per_thread=MFMA_INPUT_ELS)
+
+            s_acc = tkl.Register[B, M_qs, K2_kvs, tkl.f32](0.0)
+            log2e = tkl.Register[B, K2_kvs, M_qs, tkl.f16](1.44269504089)
+            s_ij = tkw.mma(q_i_for_s, k_j_for_s, s_acc)
+            s_ij = tkw.permute(s_ij, [B, K2_kvs, M_qs])
+            tkw.write(s_ij, s, mapping=flip_k2_m_write_mapping, elements_per_thread=MFMA_OUTPUT_ELS)
+            # Have to read for the MMA output here instead of input
+            lse_i = tkw.read(lse, elements_per_thread=MFMA_OUTPUT_ELS)
+            p_ij = tkw.exp2(log2e * (tkw.cast(s_ij, tkl.f16) - lse_i))
+            tkw.write(p_ij, p, mapping=flip_k2_m_write_mapping, elements_per_thread=MFMA_OUTPUT_ELS)
+
+            # p_ij_for_dv = tkw.read(p, mapping=flip_m_k2_read_mapping, elements_per_thread=MFMA_INPUT_ELS)
+            do_i = tkw.read(do, mapping=flip_m_n_read_mapping, elements_per_thread=MFMA_INPUT_ELS)
+            dv_j = tkw.mma(p_ij, do_i, dv_prev)
+            
+            return dv_j
+
+        tkw.write(tkw.cast(loop_q_seq_len, tkl.f16), dv, elements_per_thread=MFMA_OUTPUT_ELS)
+
+    hyperparams = {
+        ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
+        MFMA_INPUT_ELS: get_mfma_load_elems_per_thread(mfma_variant),
+        MFMA_OUTPUT_ELS: get_mfma_store_elems_per_thread(mfma_variant),
+        BLOCK_B: 1,
+        BLOCK_M: vec_size,
+        # TODO: Not actually what we want probably, but I couldn't get nested
+        # loops to work (the only option is a reduction, it insists on having
+        # args to reduce, and then it can't figure out the vector shapes for
+        # them if I give it dummy args) and I don't think our read/write scheme
+        # for dq is thread safe. So force the distribution of K2 to be degenerate.
+        BLOCK_K2: kv_seq_len,
+        B: batch,
+        M_qs: q_seq_len,
+        N_vd: v_head_dim,
+        K1_qkd: qk_head_dim,
+        K2_kvs: kv_seq_len,
+    }
+
+    hyperparams.update(get_default_scheduling_params())
+    config = get_default_run_config()
+    # config["print_ir_after_all"] = True
+    compile_config = {
+        "waves_per_eu": 2,
+        "denorm_fp_math_f32": "preserve-sign",
+        "print_pretty_mlir": True,
+        # "print_grid": True,
+        "print_ir_after": ["last"],
+        "print_indices": True,
+    }
+
+
+    with tk.gen.TestLaunchContext(
+            hyperparams,
+            canonicalize=True,
+            run=True,
+            run_bench=False,
+            run_config=config,
+            compile_config=compile_config,
+            schedule=False,
+            use_scheduling_barriers=enable_scheduling_barriers,
+        ):
+        torch.manual_seed(0)
+        q = device_randn(batch, q_seq_len, qk_head_dim, dtype=torch.float16)
+        k = device_randn(batch, kv_seq_len, qk_head_dim, dtype=torch.float16)
+        v = device_randn(batch, kv_seq_len, v_head_dim, dtype=torch.float16)
+        
+        s_ref = torch.matmul(q, k.transpose(-1, -2))
+        m_ref = torch.max(s_ref, dim=-1)[0]
+        p_squiggle_ref = torch.exp(s_ref - m_ref)
+        l_ref = torch.sum(p_squiggle_ref, dim=-1)
+        o_squiggle_ref = torch.matmul(p_squiggle_ref, v)
+        o_ref = o_squiggle_ref / l_ref
+        lse_ref = m_ref + torch.log(l_ref)
+
+        do = device_randn(batch, q_seq_len, v_head_dim, dtype=torch.float16)
+        D = torch.sum(do * o_ref, dim=-1)
+        p_ref = torch.exp(s_ref - lse_ref.unsqueeze(-1).expand(batch, q_seq_len, kv_seq_len))
+        dv_ref = torch.matmul(p_ref.transpose(-1, -2), do)
+        dp_ref = torch.matmul(do, v.transpose(-1, -2))
+
+        dv = torch.zeros_like(v)
+        s = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float32)
+        p = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float16)
+
+        expanded_lse = lse_ref.reshape((batch, q_seq_len, 1)).expand(batch, q_seq_len, kv_seq_len)
+
+        mb_bwd = attention_bwd(
+            q,
+            k,
+            do,
+            expanded_lse.transpose(-1, -2),
+            dv,
+            s,
+            p,
+        )
+
+        if dump_generated_mlir:
+            filename = f"wave_attention_repro_non_square_subtract_2_{'x'.join(map(str, shape))}.mlir"
+            with open(filename, "w") as f:
+                f.write(mb_bwd.module_op.get_asm())
+            print(f"IR dumped to {filename}")
+
+        assert_close(s.to(torch.float16), s_ref, atol=5e-2, rtol=1e-2)
+        assert_close(p, p_ref, atol=5e-2, rtol=1e-2)
+        assert_close(dv, dv_ref, atol=5e-2, rtol=1e-2)
+
