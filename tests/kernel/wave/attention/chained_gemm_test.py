@@ -116,6 +116,7 @@ def testChainedGemm(
             repeat, c, mapping=mapping, elements_per_thread=STORE_ELEMS_PER_THREAD
         )
 
+    batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
     hyperparams = {
         ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
         LOAD_ELEMS_PER_THREAD: get_mfma_load_elems_per_thread(mfma_variant),
@@ -124,11 +125,11 @@ def testChainedGemm(
         BLOCK_M: 64,
         BLOCK_N: 64,
         BLOCK_K2: 32,
-        B: shape[0],
-        M: shape[1],
-        N: shape[2],
-        K1: shape[3],
-        K2: shape[4],
+        B: batch,
+        M: q_seq_len,
+        N: v_head_dim,
+        K1: qk_head_dim,
+        K2: kv_seq_len,
     }
     hyperparams.update(get_default_scheduling_params())
     config = get_default_run_config()
@@ -149,27 +150,28 @@ def testChainedGemm(
         run_config=config,
         use_scheduling_barriers=enable_scheduling_barriers,
     ):
-        q = device_randn(shape[0], shape[1], shape[3], dtype=torch.float16)
-        k = device_randn(shape[0], shape[4], shape[3], dtype=torch.float16)
-        v = device_randn(shape[0], shape[2], shape[4], dtype=torch.float16)
-        output = device_zeros(shape[0], shape[2], shape[1], dtype=torch.float32)
+        q = device_randn(batch, q_seq_len, qk_head_dim, dtype=torch.float16)
+        k = device_randn(batch, kv_seq_len, qk_head_dim, dtype=torch.float16)
+        v = device_randn(batch, v_head_dim, kv_seq_len, dtype=torch.float16)
+        output = device_zeros(batch, v_head_dim, q_seq_len, dtype=torch.float32)
         mb = chained_gemm(q, k, v, output)
 
         if dump_generated_mlir:
             filename = f"wave_cgemm_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb.module_op.get_asm())
+                print(f"IR dumped to {filename}")
 
-        iree_ref = torch.zeros(shape[0], shape[2], shape[1], dtype=torch.float32)
+        iree_ref = torch.zeros(batch, v_head_dim, q_seq_len, dtype=torch.float32)
         generate_iree_ref(
             "chain_mmt", [q, k, v], [iree_ref], config, run_bench=run_bench
         )
-        assert_close(output, iree_ref, check_device=False)
+        assert_close(output, iree_ref, check_device=False, atol=0, rtol=0)
 
-        torch_qk = torch.matmul(q, k.transpose(-1, -2))  # m x k1 @ k1 x k2 -> m x k2
+        torch_qk = torch.matmul(q, k.transpose(-1, -2))
         torch_ref = torch.matmul(torch_qk, v.transpose(-1, -2))
         output_for_cmp = output.transpose(-1, -2).to(torch.float16)
-        assert_close(output_for_cmp, torch_ref, atol=5e-2, rtol=1e-2)
+        assert_close(output_for_cmp, torch_ref, atol=5e-2, rtol=5e-3)
 
 
 @require_e2e
@@ -178,8 +180,8 @@ def testChainedGemm(
 @pytest.mark.parametrize(
     "mfma_variant",
     [
-        (MMAType.F32_32x32x16_F8, MMAType.F32_32x32x16_K4_F8),
-        (MMAType.F32_16x16x32_F8, MMAType.F32_16x16x32_K4_F8),
+        pytest.param((MMAType.F32_32x32x16_F8, MMAType.F32_32x32x16_K4_F8), id="MFMA_32x32x16+32x32x16_K4"),
+        pytest.param((MMAType.F32_16x16x32_F8, MMAType.F32_16x16x32_K4_F8), id="MFMA_16x16x32+16x16x32_K4"),
     ],
 )
 def testChainedGemmF8(
@@ -259,6 +261,7 @@ def testChainedGemmF8(
             repeat, c, mapping=mapping, elements_per_thread=STORE_ELEMS_PER_THREAD
         )
 
+    batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
     hyperparams = {
         ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
         LOAD_ELEMS_PER_THREAD: get_mfma_load_elems_per_thread(mfma_variant[0]),
@@ -267,11 +270,11 @@ def testChainedGemmF8(
         BLOCK_M: 64,
         BLOCK_N: 64,
         BLOCK_K2: 32,
-        B: shape[0],
-        M: shape[1],
-        N: shape[2],
-        K1: shape[3],
-        K2: shape[4],
+        B: batch,
+        M: q_seq_len,
+        N: v_head_dim,
+        K1: qk_head_dim,
+        K2: kv_seq_len,
     }
     hyperparams.update(get_default_scheduling_params())
     config = get_default_run_config()
@@ -293,10 +296,10 @@ def testChainedGemmF8(
         use_scheduling_barriers=enable_scheduling_barriers,
     ):
         torch.manual_seed(0)
-        q = device_randn(shape[0], shape[1], shape[3], dtype=torch.float16)
-        k = device_randn(shape[0], shape[4], shape[3], dtype=torch.float16)
-        v = device_randn(shape[0], shape[2], shape[4], dtype=torch.float16)
-        output = device_zeros(shape[0], shape[2], shape[1], dtype=torch.float32)
+        q = device_randn(batch, q_seq_len, qk_head_dim, dtype=torch.float16)
+        k = device_randn(batch, kv_seq_len, qk_head_dim, dtype=torch.float16)
+        v = device_randn(batch, v_head_dim, kv_seq_len, dtype=torch.float16)
+        output = device_zeros(batch, v_head_dim, q_seq_len, dtype=torch.float32)
         mb = chained_gemm_f8(q, k, v, output)
 
         if dump_generated_mlir:
@@ -304,7 +307,7 @@ def testChainedGemmF8(
             with open(filename, "w") as f:
                 f.write(mb.module_op.get_asm())
 
-        iree_ref = torch.zeros(shape[0], shape[2], shape[1], dtype=torch.float32)
+        iree_ref = torch.zeros(batch, v_head_dim, q_seq_len, dtype=torch.float32)
         generate_iree_ref(
             "chain_mmt_f8", [q, k, v], [iree_ref], config, run_bench=run_bench
         )
