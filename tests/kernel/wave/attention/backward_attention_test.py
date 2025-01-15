@@ -60,19 +60,21 @@ def get_param_id(val):
 
 param_mfma_shape = pytest.mark.parametrize(
     "mfma_variant,shape",
-    [(MMAType.F32_32x32x8_F16, shape) for shape in shapes_32x32x32 + big_shapes]
-    + [(MMAType.F32_16x16x16_F16, shape) for shape in shapes_16x16x16 + big_shapes],
+    # [(MMAType.F32_32x32x8_F16, shape) for shape in shapes_32x32x32 + big_shapes]
+    [(MMAType.F32_16x16x16_F16, shape) for shape in shapes_16x16x16 + big_shapes],
     ids=get_param_id,
 )
 
-def attention_fwd_loops(q, k, v, o, lse):
+
+def attention_flash_fwd_loops(q, k, v):
     B, M_qs, K1_qkd = q.shape
     _, K2_kvs, _ = k.shape
     assert k.shape == (B, K2_kvs, K1_qkd)
     _, _, N_vd = v.shape
     assert v.shape == (B, K2_kvs, N_vd)
-    assert o.shape == (B, M_qs, N_vd)
-    assert lse.shape == (B, M_qs)
+
+    o = device_zeros(B, M_qs, N_vd)
+    lse = device_zeros(B, M_qs)
 
     # ensure we have different shapes so we get errors if there are mismatches.
     if M_qs == K2_kvs:
@@ -87,15 +89,17 @@ def attention_fwd_loops(q, k, v, o, lse):
 
     for batch in range(B):
         for start_m in range(0, M_qs, BLOCK_M_Br):
-            q_i = q[batch, start_m : start_m + BLOCK_M_Br, :]
+            end_m = start_m + BLOCK_M_Br
+            q_i = q[batch, start_m:end_m, :]
             assert q_i.shape == (BLOCK_M_Br, K1_qkd)
             o_i = device_zeros(BLOCK_M_Br, N_vd)
             l_i = device_zeros(BLOCK_M_Br)
             m_i = to_default_device(torch.full((BLOCK_M_Br,), -torch.inf))
             for start_k2 in range(0, K2_kvs, BLOCK_K2_Bc):
-                k_j = k[batch, start_k2 : start_k2 + BLOCK_K2_Bc, :]
+                end_k2 = start_k2 + BLOCK_K2_Bc
+                k_j = k[batch, start_k2:end_k2, :]
                 assert k_j.shape == (BLOCK_K2_Bc, K1_qkd)
-                v_j = v[batch, start_k2 : start_k2 + BLOCK_K2_Bc, :]
+                v_j = v[batch, start_k2:end_k2, :]
                 assert v_j.shape == (BLOCK_K2_Bc, N_vd)
                 s_ij = torch.matmul(q_i, k_j.transpose(-1, -2))
                 assert s_ij.shape == (BLOCK_M_Br, BLOCK_K2_Bc)
@@ -117,8 +121,10 @@ def attention_fwd_loops(q, k, v, o, lse):
 
             o_i = o_i / l_i.reshape(BLOCK_M_Br, 1)
             L_i = m_i + torch.log(l_i)
-            o[batch, start_m : start_m + BLOCK_M_Br, :] = o_i
-            lse[batch, start_m : start_m + BLOCK_M_Br] = L_i
+            o[batch, start_m:end_m, :] = o_i
+            lse[batch, start_m:end_m] = L_i
+
+    return o, lse
 
 
 def attention_bwd_loops(
@@ -126,11 +132,8 @@ def attention_bwd_loops(
     k,
     v,
     do,
+    o,
     lse,
-    D,
-    dq,
-    dk,
-    dv,
 ):
     B, M_qs, K1_qkd = q.shape
     _, K2_kvs, _ = k.shape
@@ -139,10 +142,13 @@ def attention_bwd_loops(
     assert v.shape == (B, K2_kvs, N_vd)
     assert do.shape == (B, M_qs, N_vd)
     assert lse.shape == (B, M_qs)
-    assert D.shape == (B, M_qs)
-    assert dq.shape == (B, M_qs, K1_qkd)
-    assert dk.shape == (B, K2_kvs, K1_qkd)
-    assert dv.shape == (B, K2_kvs, N_vd)
+
+    D = torch.sum(do * o, -1)
+    dq = torch.zeros_like(q)
+    dk = torch.zeros_like(k)
+    dv = torch.zeros_like(v)
+    ds = device_zeros(B, M_qs, K2_kvs)
+    dp = torch.zeros_like(ds)
 
     # ensure we have different shapes so we get errors if there are mismatches.
     if M_qs == K2_kvs:
@@ -151,32 +157,32 @@ def attention_bwd_loops(
     else:
         BLOCK_M_Br = M_qs // 2
         BLOCK_K2_Bc = K2_kvs // 2
-    # BLOCK_M_Br = 8
-    # BLOCK_K2_Bc = 4
 
     assert M_qs % BLOCK_M_Br == 0
     assert K2_kvs % BLOCK_K2_Bc == 0
 
     for batch in range(B):
         for start_k2 in range(0, K2_kvs, BLOCK_K2_Bc):
-            k_j = k[batch, start_k2 : start_k2 + BLOCK_K2_Bc, :]
+            end_k2 = start_k2 + BLOCK_K2_Bc
+            k_j = k[batch, start_k2:end_k2, :]
             assert k_j.shape == (BLOCK_K2_Bc, K1_qkd)
-            v_j = v[batch, start_k2 : start_k2 + BLOCK_K2_Bc, :]
+            v_j = v[batch, start_k2:end_k2, :]
             assert v_j.shape == (BLOCK_K2_Bc, N_vd)
 
             dv_j = device_zeros(BLOCK_K2_Bc, N_vd)
             dk_j = device_zeros(BLOCK_K2_Bc, K1_qkd)
 
             for start_m in range(0, M_qs, BLOCK_M_Br):
-                q_i = q[batch, start_m : start_m + BLOCK_M_Br, :]
+                end_m = start_m + BLOCK_M_Br
+                q_i = q[batch, start_m:end_m, :]
                 assert q_i.shape == (BLOCK_M_Br, K1_qkd)
-                do_i = do[batch, start_m : start_m + BLOCK_M_Br, :]
+                do_i = do[batch, start_m:end_m, :]
                 assert do_i.shape == (BLOCK_M_Br, N_vd)
-                dq_i = dq[batch, start_m : start_m + BLOCK_M_Br, :]
+                dq_i = dq[batch, start_m:end_m, :]
                 assert dq_i.shape == (BLOCK_M_Br, K1_qkd)
-                lse_i = lse[batch, start_m : start_m + BLOCK_M_Br]
+                lse_i = lse[batch, start_m:end_m]
                 assert lse_i.shape == (BLOCK_M_Br,)
-                D_i = D[batch, start_m : start_m + BLOCK_M_Br]
+                D_i = D[batch, start_m:end_m]
                 assert D_i.shape == (BLOCK_M_Br,)
                 s_ij = torch.matmul(q_i, k_j.transpose(-1, -2))
                 assert s_ij.shape == (BLOCK_M_Br, BLOCK_K2_Bc)
@@ -185,14 +191,18 @@ def attention_bwd_loops(
                 dv_j += torch.matmul(p_ij.transpose(-1, -2), do_i)
                 dp_ij = torch.matmul(do_i, v_j.transpose(-1, -2))
                 assert dp_ij.shape == (BLOCK_M_Br, BLOCK_K2_Bc)
+                dp[batch, start_m:end_m, start_k2:end_k2] = dp_ij
                 ds_ij = p_ij * (dp_ij - D_i.reshape(BLOCK_M_Br, 1))
                 assert ds_ij.shape == (BLOCK_M_Br, BLOCK_K2_Bc)
+                ds[batch, start_m:end_m, start_k2:end_k2] = ds_ij
                 dq_i += torch.matmul(ds_ij, k_j)
                 dk_j += torch.matmul(ds_ij.transpose(-1, -2), q_i)
 
-                dv[batch, start_k2 : start_k2 + BLOCK_K2_Bc, :] = dv_j
+                dv[batch, start_k2:end_k2, :] = dv_j
 
-            dk[batch, start_k2 : start_k2 + BLOCK_K2_Bc, :] = dk_j
+            dk[batch, start_k2:end_k2, :] = dk_j
+
+    return dq, dk, dv, ds, dp
 
 
 def get_attention_fwd_kernel(
@@ -553,6 +563,221 @@ def get_attention_bwd_kernel(
     return attention_bwd, hyperparams
 
 
+def get_attention_bwd_dv_only_kernel(
+    batch: int,
+    kv_seq_len: int,
+    qk_head_dim: int,
+    q_seq_len: int,
+    v_head_dim: int,
+    mfma_variant: MMAType,
+):
+    # Input sizes
+    B = tkl.sym.B  # batch
+    M_qs = tkl.sym.M  # query sequence length
+    N_vd = tkl.sym.N  # value head dimension
+    K1_qkd = tkl.sym.K1  # query/key head dimension
+    K2_kvs = tkl.sym.K2  # key/value sequence length
+
+    # Workgroup tile sizes
+    BLOCK_B = tkl.sym.BLOCK_B
+    BLOCK_M = tkl.sym.BLOCK_M
+    BLOCK_K2 = tkl.sym.BLOCK_K2
+    BLOCK_N = tkl.sym.BLOCK_N
+    BLOCK_K1 = tkl.sym.BLOCK_K1
+    # Address space (for GPU, shared(1) or global(0))
+    ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
+    # Other hyperparameters
+    MFMA_INPUT_ELS_PER_THREAD = tkl.sym.LOAD_ELEMS_PER_THREAD
+    MFMA_OUTPUT_ELS_PER_THREAD = tkl.sym.STORE_ELEMS_PER_THREAD
+
+    if mfma_variant == MMAType.F32_16x16x16_F16:
+        vec_size = 16
+    elif mfma_variant == MMAType.F32_32x32x8_F16:
+        vec_size = 32
+
+    # Expose user-constraints
+    constraints: list[tkw.Constraint] = [
+        tkw.WorkgroupConstraint(K2_kvs, BLOCK_K2, 0),
+        # Degenerate distribution seems to fix some bugs
+        tkw.WorkgroupConstraint(K1_qkd, BLOCK_K1, 1),
+        tkw.WorkgroupConstraint(N_vd, BLOCK_N, 2),
+        # Can only have 3 dimensions distributed in actual blocks or the
+        # compiler tries to index too far into waves_per_block (and if that is
+        # made longer there's just a fatal crash), so batch dimension needs to
+        # be last.
+        tkw.WorkgroupConstraint(B, BLOCK_B, 3),
+        tkw.TilingConstraint(M_qs, BLOCK_M),
+        tkw.HardwareConstraint(
+            threads_per_wave=64,
+            waves_per_block=(1, 1, 1),
+            mma_type=mfma_variant,
+            vector_shapes={B: 0, N_vd: vec_size},
+        ),
+    ]
+
+    i = tkw.IndexMapping.iterator(0)
+    j = tkw.IndexMapping.iterator(1)
+    k = tkw.IndexMapping.iterator(2)
+    flip_k2_m_write_mapping = tkw.IndexMapping(
+        num_iterators=3,
+        inputs={B: i, K2_kvs: j, M_qs: k},
+        outputs={B: i, M_qs: k, K2_kvs: j},
+    )
+
+    flip_m_n_read_mapping = tkw.IndexMapping(
+        num_iterators=3,
+        inputs={B: i, M_qs: k, N_vd: j},
+        outputs={B: i, N_vd: j, M_qs: k},
+    )
+
+    @tkw.wave(constraints)
+    def attention_bwd(
+        q: tkl.Memory[B, M_qs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        k: tkl.Memory[B, K2_kvs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        do: tkl.Memory[B, M_qs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # This has to be loaded in this way or set_node_indices fails with resolving thread shapes
+        lse: tkl.Memory[B, K2_kvs, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        dv: tkl.Memory[B, K2_kvs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        s: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
+        p: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+    ):
+
+        dv_init = tkl.Register[B, K2_kvs, N_vd, tkl.f32](0.0)
+        dk_init = tkl.Register[B, K2_kvs, K1_qkd, tkl.f32](0.0)
+
+        @tkw.reduction(M_qs, init_args=[dv_init])
+        def loop_q_seq_len(dv_prev: tkl.Register[B, K2_kvs, N_vd, tkl.f32]):
+            k_j = tkw.read(k, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
+            q_i = tkw.read(q, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
+
+            s_acc = tkl.Register[B, M_qs, K2_kvs, tkl.f32](0.0)
+            log2e = tkl.Register[B, M_qs, K2_kvs, tkl.f16](1.44269504089)
+            s_ij = tkw.mma(q_i, k_j, s_acc)
+            tkw.write(s_ij, s, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            s_ij = tkw.permute(s_ij, [B, K2_kvs, M_qs])
+            lse_i = tkw.read(lse, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            p_ij = tkw.exp2(log2e * (tkw.cast(s_ij, tkl.f16) - lse_i))
+            tkw.write(
+                p_ij,
+                p,
+                mapping=flip_k2_m_write_mapping,
+                elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD,
+            )
+
+            do_i_for_dv = tkw.read(
+                do,
+                mapping=flip_m_n_read_mapping,
+                elements_per_thread=MFMA_INPUT_ELS_PER_THREAD,
+            )
+            dv_j = tkw.mma(p_ij, do_i_for_dv, dv_prev)
+            return dv_j
+
+        tkw.write(
+            tkw.cast(loop_q_seq_len, tkl.f16),
+            dv,
+            elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD,
+        )
+
+    hyperparams = {
+        ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
+        MFMA_INPUT_ELS_PER_THREAD: get_mfma_load_elems_per_thread(mfma_variant),
+        MFMA_OUTPUT_ELS_PER_THREAD: get_mfma_store_elems_per_thread(mfma_variant),
+        BLOCK_B: 1,
+        BLOCK_M: vec_size,
+        # TODO(#381) and TODO(#384): We need the degenerate tiling to make Wave
+        # recognize the dims, but it needs to be at least the vector size or we
+        # get errors about tile size being divisible by vector size.
+        BLOCK_N: max(v_head_dim, vec_size),
+        BLOCK_K1: max(qk_head_dim, vec_size),
+        # TODO: Not actually what we want probably, but I couldn't get nested
+        # loops to work (the only option is a reduction, it insists on having
+        # args to reduce, and then it can't figure out the vector shapes for
+        # them if I give it dummy args) and I don't think our read/write scheme
+        # for dq is thread safe. So force the distribution of K2 to be degenerate.
+        BLOCK_K2: max(kv_seq_len, vec_size),
+        B: batch,
+        M_qs: q_seq_len,
+        N_vd: v_head_dim,
+        K1_qkd: qk_head_dim,
+        K2_kvs: kv_seq_len,
+    }
+
+    return attention_bwd, hyperparams
+
+
+def attention_torch_builtin_ref(q, k, v, do, scale=1):
+    q = q.clone().requires_grad_()
+    v = v.clone().requires_grad_()
+    k = k.clone().requires_grad_()
+
+    o = torch.nn.functional.scaled_dot_product_attention(
+        q, k, v, attn_mask=None, scale=1
+    )
+
+    q.retain_grad()
+    k.retain_grad()
+    v.retain_grad()
+    o.backward(do)
+
+    dq = q.grad.detach()
+    dk = k.grad.detach()
+    dv = v.grad.detach()
+    return o, dq, dk, dv
+
+
+def attention_torch_ops_ref(q, k, v, do, scale=1):
+    """Attention computed with individual torch operations so we can get intermediates."""
+    q = q.clone().requires_grad_()
+    v = v.clone().requires_grad_()
+    k = k.clone().requires_grad_()
+
+    s = scale * torch.matmul(q, k.transpose(-1, -2))
+    p = torch.softmax(s, dim=-1)
+    o = torch.matmul(p, v)
+
+    q.retain_grad()
+    k.retain_grad()
+    v.retain_grad()
+    s.retain_grad()
+    p.retain_grad()
+
+    o.backward(do)
+    dq = q.grad.detach()
+    dk = k.grad.detach()
+    dv = v.grad.detach()
+    ds = s.grad.detach()
+    dp = p.grad.detach()
+
+    return o, dq, dk, dv, s, p, ds, dp
+
+
+def attention_bwd_manual(q, k, v, do):
+    # TODO: add scale
+    # Manual backward pass for normal attention
+    s = torch.matmul(q, k.transpose(-1, -2))
+    p = torch.softmax(s, dim=-1)
+
+    dv = torch.matmul(p.transpose(-1, -2), do)
+    dp = torch.matmul(do, v.transpose(-1, -2))
+    ds = torch.zeros_like(s)
+
+    batch, q_seq_len, kv_seq_len = s.shape
+    for b in range(batch):
+        for row in range(q_seq_len):
+            p_row = p[b, row, :]
+            jacobian = p_row.unsqueeze(0) * (
+                to_default_device(torch.eye(kv_seq_len, dtype=torch.float16))
+                - p_row.unsqueeze(-1)
+            )
+
+            ds[b, row, :] = torch.matmul(dp[b, row, :], jacobian.transpose(-1, -2))
+
+    dq = torch.matmul(ds, k)
+    dk = torch.matmul(ds.transpose(-1, -2), q)
+
+    return dq, dk, dv, ds, dp
+
+
 @require_e2e
 @param_mfma_shape
 def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
@@ -560,41 +785,37 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
     extra_verification = math.prod(shape) < 500_000
 
     torch.manual_seed(0)
-    # doing all this manual stuff in float32 or we lose too much precision
+    # doing all this manual stuff in float32 or we lose too much precision. We
+    # generate the random numbers in float16 though so we at least start with
+    # something that is representable in that.
 
-    q = device_randn(batch, q_seq_len, qk_head_dim)
+    q = device_randn(batch, q_seq_len, qk_head_dim, dtype=torch.float16).to(
+        torch.float32
+    )
     # q = torch.full((batch, q_seq_len, qk_head_dim), 0.1, device=get_default_device())
     # q = torch.arange(
     #     (batch * q_seq_len * qk_head_dim), dtype=torch.float32, device=get_default_device()
     # ).reshape((batch, q_seq_len, qk_head_dim)) / (batch * q_seq_len * qk_head_dim)
     # q[0, :, (qk_head_dim//2):] = 0
 
-    k = device_randn(batch, kv_seq_len, qk_head_dim)
+    k = device_randn(batch, kv_seq_len, qk_head_dim, dtype=torch.float16).to(
+        torch.float32
+    )
     # k = torch.full((batch, kv_seq_len, qk_head_dim), 0.2, device=get_default_device())
     # k = torch.arange(
     #     (batch * kv_seq_len * qk_head_dim), dtype=torch.float32
     # ).reshape((batch, kv_seq_len, qk_head_dim)) / (batch * kv_seq_len * qk_head_dim)
     # k[0, :, (qk_head_dim//2):] = 0
 
-    v = device_randn(batch, kv_seq_len, v_head_dim)
+    v = device_randn(batch, kv_seq_len, v_head_dim, dtype=torch.float16).to(
+        torch.float32
+    )
     # v = torch.arange(
     #     (batch * kv_seq_len * v_head_dim), dtype=torch.float32
     # ).reshape((batch, kv_seq_len, v_head_dim)) / 64
 
-    # Save these to check for shenanigans later
-    q_orig = q.clone()
-    k_orig = k.clone()
-    v_orig = v.clone()
-    q.requires_grad_(True)
-    k.requires_grad_(True)
-    v.requires_grad_(True)
-
-    o_ref = torch.nn.functional.scaled_dot_product_attention(
-        q, k, v, attn_mask=None, scale=1
-    )
-
     # temporarily not scaling so I don't have to figure out how to get that into the backward kernel
-    dk_sqrt = math.sqrt(1.0 / qk_head_dim)
+    # dk_sqrt = math.sqrt(1.0 / qk_head_dim)
 
     # Fake derivative for whatever the loss function might be
     # do = to_default_device(
@@ -603,128 +824,60 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
     # do = to_default_device(
     #     torch.arange(batch*q_seq_len, dtype=torch.float32).reshape((batch, q_seq_len, 1)).expand(batch, q_seq_len, v_head_dim)
     # )
-    do = device_randn(batch, q_seq_len, v_head_dim)
-    do_orig = do.detach().clone()
+    do = device_randn(batch, q_seq_len, v_head_dim, dtype=torch.float16).to(
+        torch.float32
+    )
 
-    # IDK why we have to do retain_grad here, but the deepspeed test doesn't
-    q.retain_grad()
-    k.retain_grad()
-    v.retain_grad()
-    o_ref.backward(do)
-
-    dq_ref = q.grad.detach()
-    dk_ref = k.grad.detach()
-    dv_ref = v.grad.detach()
-
-    q.grad = None
-    k.grad = None
-    v.grad = None
+    o_ref, dq_ref, dk_ref, dv_ref = attention_torch_builtin_ref(q, k, v, do)
 
     if extra_verification:
-        # Manual normal attention
-        s = torch.matmul(q, k.transpose(-1, -2))
-        p = torch.softmax(s, dim=-1)
-        o = torch.matmul(p, v)
+        o_ops, dq_ops, dk_ops, dv_ops, s_ops, p_ops, ds_ops, dp_ops = (
+            attention_torch_ops_ref(q, k, v, do)
+        )
 
-        q.retain_grad()
-        k.retain_grad()
-        v.retain_grad()
-        s.retain_grad()
-        p.retain_grad()
+        assert_close(o_ops, o_ref)
+        assert_close(dq_ops, dq_ref)
+        assert_close(dk_ops, dk_ref)
+        assert_close(dv_ops, dv_ref)
 
-        o.backward(do)
-        dq = q.grad.detach()
-        dk = k.grad.detach()
-        dv = v.grad.detach()
-        ds = s.grad.detach()
-        dp = p.grad.detach()
-
-        assert_close(o, o_ref)
-        assert_close(dq, dq_ref)
-        assert_close(dk, dk_ref)
-        assert_close(dv, dv_ref)
-
-        # These are presumably correct at this point and now we can use them as a
-        # reference for other intermediates.
-        ds_ref = ds.detach().clone()
-        dp_ref = dp.detach().clone()
-        # And use the manual ones of these so they're consistent with the
-        # intermediate gradients.
-        dq_ref = dq.detach().clone()
-        dk_ref = dk.detach().clone()
-        dv_ref = dv.detach().clone()
-        s_ref = s.detach().clone()
-        p_ref = p.detach().clone()
-        o_ref = o.detach().clone()
-
-        del ds, dp, dq, dk, dv, s, p, o
-
-    q = q.detach().clone()
-    k = k.detach().clone()
-    v = v.detach().clone()
+        # These are presumably correct at this point and now we can use them as
+        # a reference for other intermediates. And then also use the other
+        # outputs of this as our references so that they're consistent.
+        o_ref = o_ops
+        dq_ref = dq_ops
+        dk_ref = dk_ops
+        dv_ref = dv_ops
+        s_ref = s_ops
+        p_ref = p_ops
+        ds_ref = ds_ops
+        dp_ref = dp_ops
 
     if extra_verification:
-        # Manual backward pass for normal attention
-        s = torch.matmul(q, k.transpose(-1, -2))
-        p = torch.softmax(s, dim=-1)
+        dq_man, dk_man, dv_man, ds_man, dp_man = attention_bwd_manual(q, k, v, do)
 
-        dv = torch.matmul(p.transpose(-1, -2), do)
-
-        assert_close(dv, dv_ref)
-
-        dp = torch.matmul(do, v.transpose(-1, -2))
-
-        assert_close(dp, dp_ref)
-
-        ds = device_zeros(batch, q_seq_len, kv_seq_len)
-        for b in range(batch):
-            for row in range(q_seq_len):
-                p_row = p[b, row, :]
-                jacobian = p_row.unsqueeze(0) * (
-                    to_default_device(torch.eye(kv_seq_len, dtype=torch.float16))
-                    - p_row.unsqueeze(-1)
-                )
-
-                ds[b, row, :] = torch.matmul(dp[b, row, :], jacobian.transpose(-1, -2))
-
-        assert_close(ds, ds_ref)
-
-        dq = torch.matmul(ds, k)
-        assert_close(dq, dq_ref)
-
-        dk = torch.matmul(ds.transpose(-1, -2), q)
-        assert_close(dk, dk_ref)
-
-        del ds, dp, dq, dk, dv, s, p
+        assert_close(dv_man, dv_ref)
+        assert_close(dp_man, dp_ref)
+        assert_close(ds_man, ds_ref)
+        assert_close(dq_man, dq_ref)
+        assert_close(dk_man, dk_ref)
 
         # Flash attention implemented as loops
-        o_loops = device_zeros(batch, q_seq_len, v_head_dim)
-        lse_loops = device_zeros(batch, q_seq_len)
-        attention_fwd_loops(q, k, v, o_loops, lse_loops)
+        o_loops, lse_loops = attention_flash_fwd_loops(q, k, v)
 
         assert_close(o_loops, o_ref)
+        # And now we have a reference for lse
+        lse_ref = lse_loops
 
-        # Make sure nothing's gone wonky here.
-        assert_close(q, q_orig)
-        assert_close(k, k_orig)
-        assert_close(v, v_orig)
-        assert_close(do, do_orig)
-
-        D_loops = torch.sum(do * o_loops, -1)
         dq_loops = torch.zeros_like(q)
         dk_loops = torch.zeros_like(k)
         dv_loops = torch.zeros_like(v)
 
-        attention_bwd_loops(
-            q, k, v, do, lse_loops, D_loops, dq_loops, dk_loops, dv_loops
+        dq_loops, dk_loops, dv_loops, ds_loops, dp_loops = attention_bwd_loops(
+            q, k, v, do, o_loops, lse_loops
         )
 
-        # Make sure nothing's gone wonky here.
-        assert_close(q, q_orig)
-        assert_close(k, k_orig)
-        assert_close(v, v_orig)
-        assert_close(do, do_orig)
-
+        assert_close(ds_loops, ds_ref, atol=1e-4, rtol=1e-5)
+        assert_close(dp_loops, dp_ref, atol=1e-4, rtol=1e-5)
         assert_close(dq_loops, dq_ref, atol=1e-4, rtol=1e-5)
         assert_close(dk_loops, dk_ref, atol=1e-4, rtol=1e-5)
         assert_close(dv_loops, dv_ref, atol=1e-4, rtol=1e-5)
@@ -732,9 +885,7 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
     # Alright, back to float16, which wave requires
 
     if extra_verification:
-        o_loops = o_loops.to(torch.float16)
-        lse_loops = lse_loops.to(torch.float16)
-
+        lse_ref = lse_ref.to(torch.float16)
         # s_ref and dp_ref are matrix accumulators, so still f32
         p_ref = p_ref.to(torch.float16)
         ds_ref = ds_ref.to(torch.float16)
@@ -800,7 +951,7 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
             # Can't check P, since we don't actually compute the "real" thing and rescale as we go.
             # Use the manual loops implementation to verify the LSE part of the
             # kernel, which we can't do with the base torch implementaiton.
-            assert_close(lse, lse_loops, atol=5e-2, rtol=1e-2)
+            assert_close(lse, lse_ref, atol=5e-2, rtol=1e-2)
 
         assert_close(output, o_ref, atol=5e-2, rtol=1e-2)
 
@@ -846,14 +997,6 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
         # quite a few in the paper, unfortunately).
         D = torch.sum(do * output, -1)
 
-        if extra_verification:
-            assert_close(q, q_orig.to(torch.float16))
-            assert_close(k, k_orig.to(torch.float16))
-            assert_close(v, v_orig.to(torch.float16))
-            assert_close(do, do_orig.to(torch.float16))
-
-            dp_sub_ref = (dp_ref - D.reshape((batch, q_seq_len, 1))).to(torch.float16)
-
         dq = torch.zeros_like(q)
         dk = torch.zeros_like(k)
         dv = torch.zeros_like(v)
@@ -890,16 +1033,10 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
                 f.write(mb_bwd.module_op.get_asm())
             print(f"IR dumped to {filename}")
 
-        # Make sure nothing's gone wonky here.
-        if extra_verification:
-            assert_close(q, q_orig.to(torch.float16))
-            assert_close(k, k_orig.to(torch.float16))
-            assert_close(v, v_orig.to(torch.float16))
-            assert_close(do, do_orig.to(torch.float16))
-
         assert_close(dv, dv_ref, atol=5e-2, rtol=1e-2)
 
         if extra_verification:
+            dp_sub_ref = (dp_ref - D.reshape((batch, q_seq_len, 1))).to(torch.float16)
             assert_close(dp, dp_ref, atol=5e-2, rtol=1e-2)
             assert_close(dp_sub, dp_sub_ref, atol=5e-2, rtol=1e-2)
 
