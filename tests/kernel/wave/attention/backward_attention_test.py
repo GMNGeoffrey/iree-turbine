@@ -75,6 +75,7 @@ def attention_flash_fwd_loops(q, k, v):
 
     o = device_zeros(B, M_qs, N_vd)
     lse = device_zeros(B, M_qs)
+    s = device_zeros(B, M_qs, K2_kvs)
 
     # ensure we have different shapes so we get errors if there are mismatches.
     if M_qs == K2_kvs:
@@ -103,6 +104,7 @@ def attention_flash_fwd_loops(q, k, v):
                 assert v_j.shape == (BLOCK_K2_Bc, N_vd)
                 s_ij = torch.matmul(q_i, k_j.transpose(-1, -2))
                 assert s_ij.shape == (BLOCK_M_Br, BLOCK_K2_Bc)
+                s[batch, start_m:end_m, start_k2:end_k2] = s_ij
                 m_ij = torch.maximum(m_i, torch.max(s_ij, dim=-1)[0])
                 assert m_ij.shape == (BLOCK_M_Br,)
                 p_ij = torch.exp(s_ij - torch.reshape(m_ij, (BLOCK_M_Br, 1)))
@@ -124,10 +126,10 @@ def attention_flash_fwd_loops(q, k, v):
             o[batch, start_m:end_m, :] = o_i
             lse[batch, start_m:end_m] = L_i
 
-    return o, lse
+    return o, lse, s
 
 
-def attention_bwd_loops(
+def attention_flash_bwd_loops(
     q,
     k,
     v,
@@ -563,7 +565,7 @@ def get_attention_bwd_kernel(
     return attention_bwd, hyperparams
 
 
-def get_attention_bwd_dv_only_kernel(
+def get_attention_bwd_dv_kernel(
     batch: int,
     kv_seq_len: int,
     qk_head_dim: int,
@@ -643,7 +645,6 @@ def get_attention_bwd_dv_only_kernel(
     ):
 
         dv_init = tkl.Register[B, K2_kvs, N_vd, tkl.f32](0.0)
-        dk_init = tkl.Register[B, K2_kvs, K1_qkd, tkl.f32](0.0)
 
         @tkw.reduction(M_qs, init_args=[dv_init])
         def loop_q_seq_len(dv_prev: tkl.Register[B, K2_kvs, N_vd, tkl.f32]):
@@ -664,12 +665,12 @@ def get_attention_bwd_dv_only_kernel(
                 elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD,
             )
 
-            do_i_for_dv = tkw.read(
+            do_i = tkw.read(
                 do,
                 mapping=flip_m_n_read_mapping,
                 elements_per_thread=MFMA_INPUT_ELS_PER_THREAD,
             )
-            dv_j = tkw.mma(p_ij, do_i_for_dv, dv_prev)
+            dv_j = tkw.mma(p_ij, do_i, dv_prev)
             return dv_j
 
         tkw.write(
@@ -747,6 +748,9 @@ def attention_torch_ops_ref(q, k, v, do, scale=1):
     dv = v.grad.detach()
     ds = s.grad.detach()
     dp = p.grad.detach()
+    o = o.detach()
+    s = s.detach()
+    p = p.detach()
 
     return o, dq, dk, dv, s, p, ds, dp
 
@@ -777,15 +781,11 @@ def attention_bwd_manual(q, k, v, do):
 
     return dq, dk, dv, ds, dp
 
-
 @require_e2e
 @param_mfma_shape
-def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
+def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request):
     batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
-    small_shape = math.prod(shape) < 500_000
-    extra_verification = small_shape
-    # Our float tolerances here are really bad on mi210
-    f16_tols = dict(atol=3e-2, rtol=5e-3) if small_shape else dict(atol=2e-1, rtol=5e-2)
+    tols = dict(atol=3e-2, rtol=5e-3)
 
     torch.manual_seed(0)
     # doing all this manual stuff in float32 or we lose too much precision. We
@@ -817,8 +817,126 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
     #     (batch * kv_seq_len * v_head_dim), dtype=torch.float32
     # ).reshape((batch, kv_seq_len, v_head_dim)) / 64
 
-    # temporarily not scaling so I don't have to figure out how to get that into the backward kernel
-    # dk_sqrt = math.sqrt(1.0 / qk_head_dim)
+    # Fake derivative for whatever the loss function might be
+    # do = to_default_device(
+    #     torch.full((batch, q_seq_len, v_head_dim), 10, dtype=torch.float32)
+    # )
+    # do = to_default_device(
+    #     torch.arange(batch*q_seq_len, dtype=torch.float32).reshape((batch, q_seq_len, 1)).expand(batch, q_seq_len, v_head_dim)
+    # )
+    do = device_randn(batch, q_seq_len, v_head_dim, dtype=torch.float16).to(
+        torch.float32
+    )
+
+    o_ref, _, _, dv_ref, s_ref, p_ref, _, _ = attention_torch_ops_ref(q, k, v, do)
+
+    # We validated these elsewhere
+    o_loops, lse, s_loops = attention_flash_fwd_loops(q, k, v)
+    assert_close(o_loops, o_ref)
+    assert_close(s_loops, s_ref)
+
+    attention_bwd_dv, hyperparams = get_attention_bwd_dv_kernel(
+        batch=batch,
+        kv_seq_len=kv_seq_len,
+        qk_head_dim=qk_head_dim,
+        q_seq_len=q_seq_len,
+        v_head_dim=v_head_dim,
+        mfma_variant=mfma_variant,
+    )
+    hyperparams.update(get_default_scheduling_params())
+    config = get_default_run_config()
+    # config["print_ir_after_all"] = True
+    compile_config = {
+        "waves_per_eu": 2,
+        "denorm_fp_math_f32": "preserve-sign",
+        # "print_ir_after": ["last"],
+        # "print_ir_before": ["first"],
+        # "print_signature": True,
+        # "print_pretty_mlir": True,
+        # "print_indices": True,
+    }
+
+    with tk.gen.TestLaunchContext(
+        hyperparams,
+        canonicalize=True,
+        run=True,
+        run_bench=False,
+        run_config=config,
+        compile_config=compile_config,
+        schedule=False,
+        use_scheduling_barriers=enable_scheduling_barriers,
+    ):
+        
+        q = q.to(torch.float16)
+        k = k.to(torch.float16)
+        do = do.to(torch.float16)
+
+        dv = torch.zeros_like(v).to(torch.float16)
+        s = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float32)
+        p = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float16)
+
+        expanded_lse = lse.reshape((batch, q_seq_len, 1)).expand(
+            batch, q_seq_len, kv_seq_len
+        ).to(torch.float16)
+
+        mb_bwd = attention_bwd_dv(
+            q,
+            k,
+            do,
+            expanded_lse.transpose(-1, -2),
+            dv,
+            s,
+            p,
+        )
+
+        if dump_generated_mlir:
+            filename = f"wave_attention_bwd_dv_{'x'.join(map(str, shape))}.mlir"
+            with open(filename, "w") as f:
+                f.write(mb_bwd.module_op.get_asm())
+            print(f"IR dumped to {filename}")
+        
+        assert_close(s, s_ref, **tols)
+        assert_close(dv, dv_ref.to(torch.float16), **tols)
+
+
+@require_e2e
+@param_mfma_shape
+def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
+    batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
+    small_shape = math.prod(shape) < 500_000
+    extra_verification = small_shape
+    # Our float tolerances here are really bad on mi210
+    tols = dict(atol=3e-2, rtol=5e-3) if small_shape else dict(atol=2e-1, rtol=5e-2)
+
+    torch.manual_seed(0)
+    # doing all this manual stuff in float32 or we lose too much precision. We
+    # generate the random numbers in float16 though so we at least start with
+    # something that is representable in that.
+
+    q = device_randn(batch, q_seq_len, qk_head_dim, dtype=torch.float16).to(
+        torch.float32
+    )
+    # q = torch.full((batch, q_seq_len, qk_head_dim), 0.1, device=get_default_device())
+    # q = torch.arange(
+    #     (batch * q_seq_len * qk_head_dim), dtype=torch.float32, device=get_default_device()
+    # ).reshape((batch, q_seq_len, qk_head_dim)) / (batch * q_seq_len * qk_head_dim)
+    # q[0, :, (qk_head_dim//2):] = 0
+
+    k = device_randn(batch, kv_seq_len, qk_head_dim, dtype=torch.float16).to(
+        torch.float32
+    )
+    # k = torch.full((batch, kv_seq_len, qk_head_dim), 0.2, device=get_default_device())
+    # k = torch.arange(
+    #     (batch * kv_seq_len * qk_head_dim), dtype=torch.float32
+    # ).reshape((batch, kv_seq_len, qk_head_dim)) / (batch * kv_seq_len * qk_head_dim)
+    # k[0, :, (qk_head_dim//2):] = 0
+
+    v = device_randn(batch, kv_seq_len, v_head_dim, dtype=torch.float16).to(
+        torch.float32
+    )
+    # v = torch.arange(
+    #     (batch * kv_seq_len * v_head_dim), dtype=torch.float32
+    # ).reshape((batch, kv_seq_len, v_head_dim)) / 64
 
     # Fake derivative for whatever the loss function might be
     # do = to_default_device(
@@ -831,6 +949,8 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
         torch.float32
     )
 
+    # temporarily not scaling so I don't have to figure out how to get that into the backward kernel
+    # dk_sqrt = math.sqrt(1.0 / qk_head_dim)
     o_ref, dq_ref, dk_ref, dv_ref = attention_torch_builtin_ref(q, k, v, do)
 
     if extra_verification:
@@ -865,9 +985,10 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
         assert_close(dk_man, dk_ref)
 
         # Flash attention implemented as loops
-        o_loops, lse_loops = attention_flash_fwd_loops(q, k, v)
+        o_loops, lse_loops, s_loops = attention_flash_fwd_loops(q, k, v)
 
         assert_close(o_loops, o_ref)
+        assert_close(s_loops, s_ref)
         # And now we have a reference for lse
         lse_ref = lse_loops
 
@@ -932,11 +1053,11 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
         use_scheduling_barriers=enable_scheduling_barriers,
     ):
 
-        output = device_zeros(batch, q_seq_len, v_head_dim, dtype=torch.float16)
+        o = device_zeros(batch, q_seq_len, v_head_dim, dtype=torch.float16)
         lse = device_zeros(batch, q_seq_len, dtype=torch.float16)
         s = device_zeros(batch, q_seq_len, kv_seq_len)
 
-        mb_fwd = attention_fwd(q, k, v.transpose(-1, -2), s, output, lse)
+        mb_fwd = attention_fwd(q, k, v.transpose(-1, -2), s, o, lse)
 
         if dump_generated_mlir:
             filename = f"wave_attention_fwd_{'x'.join(map(str, shape))}.mlir"
@@ -945,13 +1066,13 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
             print(f"IR dumped to {filename}")
 
         if extra_verification:
-            assert_close(s, s_ref, **f16_tols)
+            assert_close(s, s_ref, **tols)
             # Can't check P, since we don't actually compute the "real" thing and rescale as we go.
             # Use the manual loops implementation to verify the LSE part of the
             # kernel, which we can't do with the base torch implementaiton.
-            assert_close(lse, lse_ref, **f16_tols)
+            assert_close(lse, lse_ref, **tols)
 
-        assert_close(output, o_ref, **f16_tols)
+        assert_close(o, o_ref, **tols)
 
     attention_bwd, hyperparams = get_attention_bwd_kernel(
         batch=batch,
@@ -991,7 +1112,7 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
         # sense give that it is subtracted from dP which only has sequence
         # length dimensions. I'm assuming that's a typo (there are actually
         # quite a few in the paper, unfortunately).
-        D = torch.sum(do * output, -1)
+        D = torch.sum(do * o, -1)
 
         dq = torch.zeros_like(q)
         dk = torch.zeros_like(k)
@@ -1029,20 +1150,20 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
                 f.write(mb_bwd.module_op.get_asm())
             print(f"IR dumped to {filename}")
 
-        assert_close(dv, dv_ref, **f16_tols)
+        assert_close(dv, dv_ref, **tols)
 
         if extra_verification:
             dp_sub_ref = (dp_ref - D.reshape((batch, q_seq_len, 1))).to(torch.float16)
-            assert_close(dp, dp_ref, **f16_tols)
-            assert_close(dp_sub, dp_sub_ref, **f16_tols)
+            assert_close(dp, dp_ref, **tols)
+            assert_close(dp_sub, dp_sub_ref, **tols)
 
             # I don't actually understand why this way of calculating ds works at all.
-            assert_close(ds_ref, p_ref * dp_sub_ref, **f16_tols)
-            assert_close(ds, ds_ref, **f16_tols)
+            assert_close(ds_ref, p_ref * dp_sub_ref, **tols)
+            assert_close(ds, ds_ref, **tols)
 
         # the numerics here are ridiculously bad...
-        assert_close(dk, dk_ref, **f16_tols)
-        assert_close(dq, dq_ref, **f16_tols)
+        assert_close(dk, dk_ref, **tols)
+        assert_close(dq, dq_ref, **tols)
 
 
 def testReproWriteInLoopBug():
