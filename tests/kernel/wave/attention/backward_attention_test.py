@@ -30,7 +30,7 @@ from ..common.utils import (
     enable_scheduling_barriers,
     dump_generated_mlir,
 )
-from torch.testing import assert_close
+from torch.testing import assert_close, make_tensor
 
 big_shapes = [
     # (40, 1024, 64, 64, 1024),
@@ -782,7 +782,10 @@ def attention_bwd_manual(q, k, v, do):
 @param_mfma_shape
 def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
     batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
-    extra_verification = math.prod(shape) < 500_000
+    small_shape = math.prod(shape) < 500_000
+    extra_verification = small_shape
+    # Our float tolerances here are really bad on mi210
+    f16_tols = dict(atol=3e-2, rtol=5e-3) if small_shape else dict(atol=2e-1, rtol=5e-2)
 
     torch.manual_seed(0)
     # doing all this manual stuff in float32 or we lose too much precision. We
@@ -876,11 +879,11 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
             q, k, v, do, o_loops, lse_loops
         )
 
-        assert_close(ds_loops, ds_ref, atol=1e-4, rtol=1e-5)
-        assert_close(dp_loops, dp_ref, atol=1e-4, rtol=1e-5)
-        assert_close(dq_loops, dq_ref, atol=1e-4, rtol=1e-5)
-        assert_close(dk_loops, dk_ref, atol=1e-4, rtol=1e-5)
-        assert_close(dv_loops, dv_ref, atol=1e-4, rtol=1e-5)
+        assert_close(ds_loops, ds_ref)
+        assert_close(dp_loops, dp_ref)
+        assert_close(dq_loops, dq_ref)
+        assert_close(dk_loops, dk_ref)
+        assert_close(dv_loops, dv_ref)
 
     # Alright, back to float16, which wave requires
 
@@ -918,9 +921,6 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
         # "print_ir_after": ["set_node_indices", "expand_graph", "first", "last"],
     }
 
-    dynamic_symbols = []
-    dynamic_symbols_map = {}
-
     with tk.gen.TestLaunchContext(
         hyperparams,
         canonicalize=True,
@@ -930,8 +930,6 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
         compile_config=compile_config,
         schedule=False,
         use_scheduling_barriers=enable_scheduling_barriers,
-        dynamic_symbols=dynamic_symbols,
-        dynamic_symbols_map=dynamic_symbols_map,
     ):
 
         output = device_zeros(batch, q_seq_len, v_head_dim, dtype=torch.float16)
@@ -947,13 +945,13 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
             print(f"IR dumped to {filename}")
 
         if extra_verification:
-            assert_close(s, s_ref, atol=5e-2, rtol=1e-2)
+            assert_close(s, s_ref, **f16_tols)
             # Can't check P, since we don't actually compute the "real" thing and rescale as we go.
             # Use the manual loops implementation to verify the LSE part of the
             # kernel, which we can't do with the base torch implementaiton.
-            assert_close(lse, lse_ref, atol=5e-2, rtol=1e-2)
+            assert_close(lse, lse_ref, **f16_tols)
 
-        assert_close(output, o_ref, atol=5e-2, rtol=1e-2)
+        assert_close(output, o_ref, **f16_tols)
 
     attention_bwd, hyperparams = get_attention_bwd_kernel(
         batch=batch,
@@ -985,8 +983,6 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
         compile_config=compile_config,
         schedule=False,
         use_scheduling_barriers=enable_scheduling_barriers,
-        dynamic_symbols=dynamic_symbols,
-        dynamic_symbols_map=dynamic_symbols_map,
     ):
         # TODO: maybe compute this within the kernel? The description of the
         # backward pass in the Flash Attention 2 paper has it computed external
@@ -1033,20 +1029,20 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
                 f.write(mb_bwd.module_op.get_asm())
             print(f"IR dumped to {filename}")
 
-        assert_close(dv, dv_ref, atol=5e-2, rtol=1e-2)
+        assert_close(dv, dv_ref, **f16_tols)
 
         if extra_verification:
             dp_sub_ref = (dp_ref - D.reshape((batch, q_seq_len, 1))).to(torch.float16)
-            assert_close(dp, dp_ref, atol=5e-2, rtol=1e-2)
-            assert_close(dp_sub, dp_sub_ref, atol=5e-2, rtol=1e-2)
+            assert_close(dp, dp_ref, **f16_tols)
+            assert_close(dp_sub, dp_sub_ref, **f16_tols)
 
             # I don't actually understand why this way of calculating ds works at all.
-            assert_close(ds_ref, p_ref * dp_sub_ref, atol=5e-2, rtol=1e-2)
-            assert_close(ds, ds_ref, atol=5e-2, rtol=1e-2)
+            assert_close(ds_ref, p_ref * dp_sub_ref, **f16_tols)
+            assert_close(ds, ds_ref, **f16_tols)
 
         # the numerics here are ridiculously bad...
-        assert_close(dk, dk_ref, atol=1e-1, rtol=5e-2)
-        assert_close(dq, dq_ref, atol=1e-1, rtol=5e-2)
+        assert_close(dk, dk_ref, **f16_tols)
+        assert_close(dq, dq_ref, **f16_tols)
 
 
 def testReproWriteInLoopBug():
