@@ -316,7 +316,7 @@ def get_mma_dimensional_mapping(
         except KeyError as e:
             raise RuntimeError(f"{node}:\n{lhs_shape=}\n{rhs_shape=}\n{acc_shape=}\n{custom.lhs=}\n{custom.rhs=}\n{custom.acc=}") from e
         if lhs_shape[-1] != k or rhs_shape[-1] != k:
-            raise RuntimeError(f"MMA shared dimension must be last {lhs_shape=}\n{rhs_shape=}\n{k=}\n{custom}")
+            raise RuntimeError(f"{node}: MMA shared dimension must be last\n{lhs_shape=}\n{rhs_shape=}\n{k=}\n{custom}")
         if custom not in mapping:
             mapping[custom] = {}
         mapping[custom][m] = MMAOperand.M
