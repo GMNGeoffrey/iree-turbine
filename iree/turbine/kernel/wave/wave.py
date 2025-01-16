@@ -500,10 +500,16 @@ class LaunchableWave(Launchable):
         emitter = WaveEmitter(
             dispatch_entrypoint, trace, self.constraints, dynamic_symbols
         )
-        emitter.emit(trace.get_root_graph())
+        try:
+            emitter.emit(trace.get_root_graph())
+        except:
+            print("Error in emitter")
+            asm = mb.module_op.get_asm()
+            print(asm)
+            raise
+        emitter.finish()
         # pretty = '\n'.join(f"{k}: {v}" for k, v in emitter.root_sig._bindings_by_reference.items())
         # print(pretty)
-        emitter.finish()
 
         if kwargs.get("canonicalize", False):
             canonicalize_module(mb.module_op)
