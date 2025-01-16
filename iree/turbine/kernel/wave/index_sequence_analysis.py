@@ -355,9 +355,11 @@ def verify_nodes(trace: CapturedTrace):
 
 def print_node_indices(trace: CapturedTrace):
     print("Indices for all nodes:")
+    width = max(len(f"{node}") for node in trace.walk())
     for node in trace.walk():
         custom = get_custom(node)
-        print(f"{custom.fx_node}: {custom.index}, {custom.vector_shapes}")
+        node_str = str(node)
+        print(f"{node_str:{width}}: {custom.index}, {custom.vector_shapes}")
     print()
 
 def set_node_indices(trace: CapturedTrace, constraints: list[Constraint]):

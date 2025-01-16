@@ -162,7 +162,11 @@ class WaveEmitter:
         except KeyError:
             raise CodegenError(f"No handler registered for op {target_op}")
 
-        handler(self, node)
+        try:
+            handler(self, node)
+        except:
+            print(f"Error handling {node}")
+            raise
 
     def lookup_node_values(self, node: fx.Node) -> List[Value]:
         assert NDEBUG or isinstance(node, fx.Node)
@@ -1392,8 +1396,8 @@ def handle_broadcast(emitter: WaveEmitter, node: fx.Node):
     # Only support broadcasting vector<1xdtype> for now.
     if not VectorType.isinstance(vector_type):
         raise NotImplementedError("Scalar src is not implemented yet for shuffleOp.")
-    assert vector_type.rank == 1
-    assert vector_type.shape[0] == 1
+    assert vector_type.rank == 1, f"{vector_type}"
+    assert vector_type.shape[0] == 1, f"{vector_type}"
 
     # Extract and Splat
     # If by chance broadcast size  matches current size, we can return src.
