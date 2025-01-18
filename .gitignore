@@ -38,3 +38,6 @@ version_local.json
 
 # Test artifacts
 .lit_test_times.txt
+
+# Output files
+out
