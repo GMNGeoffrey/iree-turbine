@@ -885,6 +885,10 @@ def get_attention_bwd_dk_kernel(
             v_j = tkw.read(v, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
             do_i = tkw.read(do, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
             dp_ij = tkw.mma(do_i, v_j, dp_acc)
+            # This no-op permute fixes a compiler error by hiding the N index of
+            # the mma from the cast that uses it. Otherwise, the cast operation
+            # fails to update the op it uses during expansion.
+            dp_ij = tkw.permute(dp_ij, [B, M_qs, K2_kvs])
             tkw.write(dp_ij, dp, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
 
             D_i = tkw.read(D, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
@@ -892,18 +896,9 @@ def get_attention_bwd_dk_kernel(
             tkw.write(dp_ij_sub, dp_sub, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
             dp_ij_sub = tkw.permute(dp_ij_sub, [B, K2_kvs, M_qs])
 
-            # Just multiplying p_ij * dp_ij_sub breaks the previously calculated
-            # dp. We have to load back p in the required layout.
-            # p_ij_for_ds = tkw.read(p, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
-            # ds_ij = p_ij
             ds_ij = p_ij * dp_ij_sub
             tkw.write(ds_ij, ds, mapping=flip_k2_m_write_mapping, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
 
-            # ds_ij_for_dk = tkw.read(
-            #     ds,
-            #     mapping=flip_m_k2_read_mapping,
-            #     elements_per_thread=MFMA_INPUT_ELS_PER_THREAD,
-            # )
             q_i_for_dk = tkw.read(
                 q,
                 mapping=flip_m_k1_read_mapping,
@@ -975,6 +970,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
     v = device_randn(batch, kv_seq_len, v_head_dim, dtype=torch.float16).to(
         torch.float32
     )
+    # v = torch.full((batch, kv_seq_len, v_head_dim), 0.3, device=get_default_device())
     # v = torch.arange(
     #     (batch * kv_seq_len * v_head_dim), dtype=torch.float32
     # ).reshape((batch, kv_seq_len, v_head_dim)) / 64
@@ -1075,11 +1071,11 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
     compile_config = {
         "waves_per_eu": 2,
         "denorm_fp_math_f32": "preserve-sign",
-        "print_ir_after": ["last"],
-        "print_ir_before": ["first"],
+        # "print_ir_before": ["first", "expand_graph"],
+        # "print_ir_after": ["last", "expand_graph"],
         # "print_signature": True,
-        "print_pretty_mlir": True,
-        "print_indices": True,
+        # "print_pretty_mlir": True,
+        # "print_indices": True,
     }
 
     with tk.gen.TestLaunchContext(
@@ -1130,7 +1126,6 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         assert_close(dp_sub, dp_sub_ref, **tols)
         assert_close(ds, ds_ref, **tols)
         assert_close(dk, dk_ref, **tols)
-
 
 @require_e2e
 @param_mfma_shape
