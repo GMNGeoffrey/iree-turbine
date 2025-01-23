@@ -30,7 +30,7 @@ from ..common.utils import (
     enable_scheduling_barriers,
     dump_generated_mlir,
 )
-from torch.testing import assert_close, make_tensor
+from torch.testing import assert_close
 
 big_shapes = [
     # (40, 1024, 64, 64, 1024),
@@ -897,7 +897,7 @@ def get_attention_bwd_dk_kernel(
             # p_ij_for_ds = tkw.read(p, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
             # ds_ij = p_ij
             ds_ij = p_ij * dp_ij_sub
-            # tkw.write(ds_ij, ds, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            tkw.write(ds_ij, ds, mapping=flip_k2_m_write_mapping, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
 
             # ds_ij_for_dk = tkw.read(
             #     ds,
@@ -1075,8 +1075,8 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
     compile_config = {
         "waves_per_eu": 2,
         "denorm_fp_math_f32": "preserve-sign",
-        "print_ir_after": ["last", "set_node_indices"],
-        # "print_ir_before": ["first"],
+        "print_ir_after": ["last"],
+        "print_ir_before": ["first"],
         # "print_signature": True,
         "print_pretty_mlir": True,
         "print_indices": True,
@@ -1126,11 +1126,10 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
 
         assert_close(s, s_ref, **tols)
         assert_close(p, p_ref, **tols)
-        # assert_close(dp, dp_ref, **tols)
-        # assert_close(dp_sub, dp_sub_ref, **tols)
-        # assert_close(ds, ds_ref, **tols)
+        assert_close(dp, dp_ref, **tols)
+        assert_close(dp_sub, dp_sub_ref, **tols)
+        assert_close(ds, ds_ref, **tols)
         assert_close(dk, dk_ref, **tols)
-
 
 
 @require_e2e
