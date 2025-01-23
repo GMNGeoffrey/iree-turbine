@@ -74,6 +74,10 @@ def read(
     ...
 
 
+def conditional(condition: "Register") -> Callable[[Callable[[], None]], None]:
+    ...
+
+
 def reduction(
     axis: IndexExpr, init_args: Sequence["Register"]
 ) -> Callable[[Callable[[AccT], AccT]], AccT]:
@@ -95,6 +99,14 @@ def write(
     mapping: Optional[IndexMapping] = None,
     mapping_dynamic_vals: "Register" | tuple["Register", ...] = (),
 ):
+    ...
+
+
+def apply_expr(value: "Register", expr: Callable) -> "Register":
+    ...
+
+
+def set_symbol(symbol: IndexExpr, value: "Register"):
     ...
 
 
@@ -819,8 +831,31 @@ class Placeholder(CustomOp):
     def indexing_dims(self) -> list[IndexSymbol]:
         return list(self._type.symbolic_shape) if self._type else []
 
+    def get_captured_fx_node(self) -> Optional[fx.Node]:
+        return self.fx_node.meta.get("lifted", None)
+
     def infer_type(self):
         self.fx_node.type = self._type
+
+    @property
+    def index(self) -> list[dict[IndexSymbol, IndexSequence]]:
+        var = self.get_captured_fx_node()
+        if var is not None:
+            return get_custom(var).index
+
+        if hasattr(self.fx_node, "index"):
+            return self.fx_node.index
+
+        return None
+
+    @index.setter
+    def index(self, value: Any):
+        var = self.get_captured_fx_node()
+        if var is None:
+            CustomOp.index.fset(self, value)
+            return
+
+        get_custom(var).index = value
 
 
 @dataclass
@@ -1072,13 +1107,14 @@ class Read(CustomOp):
             iters = self.mapping.iters
             mapping = self.mapping.dynamic_val_mappings[i]
 
-            # This logic relies on fact out mapping is identity.
+            # This logic assumes that the output mapping is identity.
             subs = {
                 k: index[v] for k, v in zip(iters, self.mapping.output_mapping.keys())
             }
             return {
                 k: IndexSequence.from_expr(mapping[k], subs)
                 for k in arg.type.symbolic_shape
+                if k in mapping
             }
 
         return index
@@ -1134,9 +1170,54 @@ class Read(CustomOp):
         )
 
 
+class NestedRegionOp(CustomOp):
+    def captured_vars(self, graph: fx.Graph) -> list[fx.Node]:
+        """
+        Nodes that are placeholders and are not iter args are captured vars.
+        """
+        captured_vars = []
+        for nested_node in graph.nodes:
+            custom = get_custom(nested_node)
+            if isinstance(custom, Placeholder) and not isinstance(custom, IterArg):
+                captured_vars.append(nested_node)
+        return captured_vars
+
+
+@define_op("conditional")
+@dataclass
+class Conditional(NestedRegionOp):
+    condition: fx.Proxy
+    subgraph_name: str
+    implicit_captures: Sequence[fx.Proxy]
+
+    @classmethod
+    def handle(cls, graph, *args, **kwargs):
+        def wrapper(f):
+            with graph.subtracer() as subtracer:
+                subgraph_name, implicit_captures = subtracer.trace(f)
+            node = Conditional(
+                *args,
+                **kwargs,
+                subgraph_name=subgraph_name,
+                implicit_captures=implicit_captures,
+            )
+
+            node._add_proxy_to_graph(graph)
+            node.fx_node.node.tkw_op = cls
+            node.fx_node.node.tkw_op_name = cls.tkw_op_name
+            graph.subgraphs[subgraph_name].parent_op = node.fx_node.node
+            return node.fx_node
+
+        return wrapper
+
+    @property
+    def indexing_dims(self) -> list[IndexSymbol]:
+        return get_custom(self.condition).indexing_dims
+
+
 @define_op("reduction")
 @dataclass
-class Reduction(CustomOp):
+class Reduction(NestedRegionOp):
     axis: IndexSymbol
     init_args: Sequence[Any]
     subgraph_name: str
@@ -1216,17 +1297,6 @@ class Reduction(CustomOp):
         # Sort by iter_idx.
         iter_args = sorted(iter_args, key=lambda x: get_custom(x).iter_idx)
         return iter_args
-
-    def captured_vars(self, graph: fx.Graph) -> list[fx.Node]:
-        """
-        Nodes that are placeholders and are not iter args are captured vars.
-        """
-        captured_vars = []
-        for nested_node in graph.nodes:
-            custom = get_custom(nested_node)
-            if isinstance(custom, Placeholder) and not isinstance(custom, IterArg):
-                captured_vars.append(nested_node)
-        return captured_vars
 
     def infer_type(self):
         res_types = [get_custom(x).type for x in self.init_args]
@@ -1331,13 +1401,14 @@ class Write(CustomOp):
             iters = self.mapping.iters
             mapping = self.mapping.dynamic_val_mappings[i]
 
-            # This logic relies on fact in mapping is identity.
+            # This logic assumes that the input mapping is identity.
             subs = {
                 k: index[v] for k, v in zip(iters, self.mapping.input_mapping.keys())
             }
             return {
                 k: IndexSequence.from_expr(mapping[k], subs)
                 for k in arg.type.symbolic_shape
+                if k in mapping
             }
 
         return index
@@ -1385,6 +1456,36 @@ class Write(CustomOp):
             elements_per_thread=self.elements_per_thread,
             is_read=False,
         )
+
+
+@define_op("apply_expr")
+@dataclass
+class ApplyExpr(CustomOp):
+    register_: fx.Proxy
+    expr: Callable
+
+    @property
+    def type(self) -> "Register":
+        return get_custom(self.register_).type
+
+    @property
+    def indexing_dims(self) -> list[IndexSymbol]:
+        return get_custom(self.register_).indexing_dims
+
+
+@define_op("set_symbol")
+@dataclass
+class SetSymbol(CustomOp):
+    symbol: IndexExpr
+    register_: fx.Proxy
+
+    @property
+    def type(self) -> "Register":
+        return get_custom(self.register_).type
+
+    @property
+    def indexing_dims(self) -> list[IndexSymbol]:
+        return get_custom(self.register_).indexing_dims
 
 
 @define_py_op(operator.getitem)

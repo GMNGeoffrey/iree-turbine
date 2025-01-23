@@ -10,12 +10,14 @@ import sympy
 import math
 from typing import Any, Callable, ClassVar, Optional, List, Type, Dict
 from dataclasses import dataclass
+import sympy.functions
+import sympy.functions.elementary
+import sympy.functions.elementary.piecewise
 import torch.fx as fx
 import torch.utils._pytree as pytree
 from collections import namedtuple
 
 from .symbolic_constraints import SymbolicAlias
-
 from ..compiler.ir import (
     Attribute,
     DenseElementsAttr,
@@ -49,30 +51,33 @@ from iree.turbine.aot.support.ir_utils import _is_float_type, _is_integer_like_t
 # TK infrastructure imports.
 from iree.turbine.kernel.lang.global_symbols import *
 from ..ops.wave_ops import (
-    write,
-    broadcast,
-    register,
-    mma,
-    shuffle,
-    read,
-    reduction,
-    exp2,
-    log2,
-    reciprocal,
+    CustomOp,
     abs,
-    maximum,
-    get_custom,
-    get_result,
     allocate,
-    shared_memory_barrier,
+    apply_expr,
+    broadcast,
+    cast,
+    conditional,
+    exp2,
     extract,
     extract_slice,
-    CustomOp,
+    get_custom,
+    get_result,
+    log2,
+    maximum,
+    mma,
+    permute,
+    read,
+    reciprocal,
+    reduction,
+    register,
+    reshape,
     scheduling_barrier,
     scheduling_group_barrier,
-    cast,
-    permute,
-    reshape,
+    set_symbol,
+    shared_memory_barrier,
+    shuffle,
+    write,
 )
 from ..lang.wave_types import IndexMapping, IndexSymbol
 from ..compiler.base import CodegenError, ValidationError, NDEBUG
@@ -96,7 +101,7 @@ from .constraints import (
 from .utils import subs_idxc, find_index_bounds, get_hardware_vector_map
 
 # Indexing imports.
-from .._support.indexing import IndexingContext, IndexExpr, IndexSequence
+from .._support.indexing import IndexingContext, IndexExpr, IndexSequence, index_symbol
 from .scheduling.resources import get_scheduling_mask
 
 
@@ -367,6 +372,7 @@ def gen_sympy_index(dynamics: dict[IndexSymbol, Value], expr: sympy.Expr) -> OpR
                 cmp = arith_d.cmpi(
                     arith_d.CmpIPredicate.eq, *_broadcast(value.numerator, zero)
                 )
+                zero, result = _broadcast(zero, result)
                 value = arith_d.select(cmp, zero, result)
             else:
                 value = arith_d.ceildivsi(
@@ -421,6 +427,9 @@ def gen_sympy_index(dynamics: dict[IndexSymbol, Value], expr: sympy.Expr) -> OpR
     expr = expr.subs(idxc.subs)
     # Why affine, for now simply create indexing expressions.
     # This can easily be adapted to affine expressions later.
+    select_stack = []
+    if isinstance(expr, sympy.Piecewise):
+        assert len(expr.args) == 2 and expr.args[1][1], f"Unsupported piecewise {expr}"
     for term in sympy.postorder_traversal(expr):
         match term:
             case sympy.Symbol():
@@ -461,6 +470,13 @@ def gen_sympy_index(dynamics: dict[IndexSymbol, Value], expr: sympy.Expr) -> OpR
                 _enforce_non_rational(lhs, term)
                 res = arith_d.cmpi(arith_d.CmpIPredicate.slt, *_broadcast(lhs, rhs))
                 stack.append(res)
+            case sympy.StrictGreaterThan():
+                rhs = stack.pop()
+                lhs = stack.pop()
+                _enforce_non_rational(rhs, term)
+                _enforce_non_rational(lhs, term)
+                res = arith_d.cmpi(arith_d.CmpIPredicate.sgt, *_broadcast(lhs, rhs))
+                stack.append(res)
             case sympy.And():
                 rhs = stack.pop()
                 lhs = stack.pop()
@@ -477,10 +493,22 @@ def gen_sympy_index(dynamics: dict[IndexSymbol, Value], expr: sympy.Expr) -> OpR
                 lhs = stack.pop()
                 _enforce_non_rational(rhs, term)
                 _enforce_non_rational(lhs, term)
-                if _is_integer_like_type(rhs.type):
+                elem_type = get_type_or_element_type(rhs.type)
+                if _is_integer_like_type(elem_type):
                     res = arith_d.maxsi(*_broadcast(lhs, rhs))
                 else:
                     res = arith_d.maximumf(*_broadcast(lhs, rhs))
+                stack.append(res)
+            case sympy.Min():
+                rhs = stack.pop()
+                lhs = stack.pop()
+                _enforce_non_rational(rhs, term)
+                _enforce_non_rational(lhs, term)
+                elem_type = get_type_or_element_type(rhs.type)
+                if _is_integer_like_type(elem_type):
+                    res = arith_d.minsi(*_broadcast(lhs, rhs))
+                else:
+                    res = arith_d.minimumf(*_broadcast(lhs, rhs))
                 stack.append(res)
             case sympy.logic.boolalg.BooleanFalse():
                 res = arith_d.constant(IntegerType.get_signless(1), 0)
@@ -506,6 +534,19 @@ def gen_sympy_index(dynamics: dict[IndexSymbol, Value], expr: sympy.Expr) -> OpR
                     stack.append(base)
             case sympy.UnevaluatedExpr():
                 continue
+            case sympy.functions.elementary.piecewise.ExprCondPair():
+                cond = stack.pop()
+                expr = stack.pop()
+                select_stack.append(cond)
+                select_stack.append(expr)
+                continue
+            case sympy.Piecewise():
+                expr = select_stack.pop()
+                cond = select_stack.pop()
+                last_expr = select_stack.pop()
+                last_cond = select_stack.pop()
+                res = arith_d.select(last_cond, last_expr, expr)
+                stack.append(res)
             case _:
                 raise CodegenError(f"Can not handle {type(term)} : {term}")
 
@@ -885,6 +926,7 @@ def handle_write(emitter: WaveEmitter, node: fx.Node):
         raise ValidationError("codegen expected write to have index attr.")
 
     index = node.index
+
     input_shape = _get_symbolic_shape(register)
     output_shape = _get_symbolic_shape(memory)
     if get_custom(node).has_identity_mapping():
@@ -919,6 +961,46 @@ def handle_write(emitter: WaveEmitter, node: fx.Node):
             vector_d.maskedstore(kb_dest, start_indices, mask, insert_vector)
         else:
             vector_d.scatter(kb_dest, start_indices, offsets_vec, mask, insert_vector)
+
+
+@handle_op(apply_expr)
+def handle_apply_expr(emitter: WaveEmitter, node: fx.Node):
+    try:
+        register, expr = node.args
+    except ValueError as e:
+        raise ValidationError("Malformed arguments") from e
+
+    APPLY_EXPR_ARG = index_symbol("$APPLY_EXPR_ARG")
+    expr = expr(APPLY_EXPR_ARG)
+
+    register = cast_vector(emitter, register, element_type=IndexType.get())
+
+    subs = add_emitter_subs(emitter)
+    subs[APPLY_EXPR_ARG] = register
+    result = gen_sympy_index(subs, expr)
+    emitter.bind_node_proxy(node, IRProxyValue(result))
+
+
+def _to_scalar(val: Value) -> Value:
+    src_type = val.type
+    if VectorType.isinstance(src_type):
+        assert (
+            src_type.rank == 1 and src_type.shape[0] == 1
+        ), f"Only size 1 vectors are supported: got {src_type}"
+        val = vector_d.extract(val, static_position=[0], dynamic_position=[])
+
+    return val
+
+
+@handle_op(set_symbol)
+def handle_set_symbol(emitter: WaveEmitter, node: fx.Node):
+    try:
+        symbol, register = node.args
+    except ValueError as e:
+        raise ValidationError("Malformed arguments") from e
+
+    register = cast_vector(emitter, register, element_type=IndexType.get())
+    emitter.dynamic_dims[symbol] = _to_scalar(register)
 
 
 ###############################################################################
@@ -1222,6 +1304,36 @@ def handle_abs(source: Value) -> OpResult:
 ###############################################################################
 # Control Flow ops
 ###############################################################################
+
+
+@handle_op(conditional)
+def handle_conditional(emitter: WaveEmitter, node: fx.Node):
+    try:
+        condition, subgraph, implicit_capture = node.args
+    except ValueError as e:
+        raise ValidationError("Malformed arguments") from e
+
+    condition = cast_vector(emitter, condition)
+    condition = _to_scalar(condition)
+
+    cond_type = condition.type
+    assert IntegerType.isinstance(
+        cond_type
+    ), f"Condition must me integer, got {cond_type}"
+
+    zero = arith_d.constant(cond_type, 0)
+    condition = arith_d.cmpi(arith_d.CmpIPredicate.ne, condition, zero)
+
+    if_op = scf_d.IfOp(condition)
+    with InsertionPoint(if_op.then_block) as ip:
+        subgraph: fx.Graph = emitter.trace.get_subgraph(subgraph)
+
+        captured_vars: list[fx.Node] = get_custom(node).captured_vars(subgraph)
+        for root_v, subgraph_v in zip(implicit_capture, captured_vars):
+            emitter._node_values[subgraph_v] = emitter.lookup_node_values(root_v)
+        # Emit the subgraph.
+        emitter._emit_graph(subgraph)
+        scf_d.YieldOp([])
 
 
 @handle_op(reduction)

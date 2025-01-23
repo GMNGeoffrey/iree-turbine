@@ -41,6 +41,7 @@ from .utils import (
 )
 from .minimize_global_loads import minimize_global_loads
 from .decompose_reduce_ops import decompose_reduce_ops
+from .decompose_vmma_ops import decompose_vmma_ops
 from .barriers import add_shared_memory_barriers
 from ..lang import Grid, IndexMapping
 from ..lang.global_symbols import *
@@ -386,6 +387,7 @@ class LaunchableWave(Launchable):
             # Clean up chains of GetResults
             remove_chained_getresult,
             # Optimizations.
+            curry_constraints(decompose_vmma_ops),
             curry_constraints(hoist_loop_invariant_ops),
             curry_constraints(minimize_global_loads),
 
@@ -449,6 +451,8 @@ class LaunchableWave(Launchable):
         aliases = [x.source for x in self.constraints if isinstance(x, SymbolicAlias)]
         for constraint in self.workgroup_constraints:
             if constraint.dim in aliases:
+                continue
+            if not constraint.primary:
                 continue
             dim = (
                 constraint.workgroup_dim

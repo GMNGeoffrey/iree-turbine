@@ -27,6 +27,9 @@ from ..ops.wave_ops import (
     ExtractSlice,
     IterArg,
     Reshape,
+    Read,
+    SetSymbol,
+    ApplyExpr,
 )
 from ..lang.wave_types import IndexMapping
 from .constraints import (
@@ -189,7 +192,9 @@ def DCE(trace: CapturedTrace):
         )
 
         return (
-            not custom.users and not isinstance(custom, Output) and not is_global_write
+            not custom.users
+            and not isinstance(custom, (Output, SetSymbol, ApplyExpr))
+            and not is_global_write
         )
 
     while removable_nodes := trace.walk(is_removable_operator):
@@ -317,6 +322,7 @@ def get_mma_dimensional_mapping(
             raise RuntimeError(f"{node}:\n{lhs_shape=}\n{rhs_shape=}\n{acc_shape=}\n{custom.lhs=}\n{custom.rhs=}\n{custom.acc=}") from e
         if lhs_shape[-1] != k or rhs_shape[-1] != k:
             raise RuntimeError(f"{node}: MMA shared dimension must be last\n{lhs_shape=}\n{rhs_shape=}\n{k=}\n{custom}")
+
         if custom not in mapping:
             mapping[custom] = {}
         mapping[custom][m] = MMAOperand.M
@@ -805,9 +811,16 @@ def get_users(
         if isinstance(custom, Reduction):
             # Map init arg to iter arg
             reduction = custom
-            init_arg_idx = custom.init_args.index(node)
             graph = custom.get_root_graph().subgraphs[custom.subgraph_name]
-            users.append(custom.iter_args(graph)[init_arg_idx])
+            if node in custom.init_args:
+                init_arg_idx = custom.init_args.index(node)
+                users.append(custom.iter_args(graph)[init_arg_idx])
+            else:
+                assert node in custom.implicit_captures
+                for outside_node in graph.nodes:
+                    if outside_node.meta.get("lifted", None) == node:
+                        users.append(outside_node)
+                        break
             continue
         if isinstance(custom, Output):
             # Map output to get result
@@ -1042,12 +1055,14 @@ def get_mfma_load_elems_per_thread(mfma_variant: MMAType) -> int:
             return 4
         case (
             MMAType.F32_16x16x32_F8
+            | MMAType.F32_16x16x32_K8_F16
             | MMAType.F32_16x16x32_K4_F8
             | MMAType.I32_16x16x32_I8
         ):
             return 8
         case (
             MMAType.F32_32x32x16_F8
+            | MMAType.F32_32x32x16_K8_F16
             | MMAType.F32_32x32x16_K4_F8
             | MMAType.I32_32x32x16_I8
         ):
@@ -1062,12 +1077,14 @@ def get_mfma_store_elems_per_thread(mfma_variant: MMAType) -> int:
             return 16
         case (
             MMAType.F32_16x16x32_F8
+            | MMAType.F32_16x16x32_K8_F16
             | MMAType.F32_16x16x32_K4_F8
             | MMAType.I32_16x16x32_I8
         ):
             return 4
         case (
             MMAType.F32_32x32x16_F8
+            | MMAType.F32_32x32x16_K8_F16
             | MMAType.F32_32x32x16_K4_F8
             | MMAType.I32_32x32x16_I8
         ):
@@ -1096,6 +1113,14 @@ def get_default_device() -> str:
 
 def to_default_device(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.to(get_default_device())
+
+
+def device_arange(*args, **kwargs):
+    return to_default_device(torch.arange(*args, **kwargs))
+
+
+def device_full(*args, **kwargs):
+    return to_default_device(torch.full(*args, **kwargs))
 
 
 def device_randn(*args, **kwargs):

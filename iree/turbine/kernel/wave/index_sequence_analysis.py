@@ -8,18 +8,19 @@ from ..ops.wave_ops import (
     Allocate,
     BinaryPyOp,
     Broadcast,
-    Read,
-    Write,
+    CustomOp,
     ExtractSlice,
     get_custom,
-    Reduction,
-    ReduceOp,
-    MMA,
-    Placeholder,
     IterArg,
-    CustomOp,
-    Reshape,
+    MMA,
+    NestedRegionOp,
     Output,
+    Placeholder,
+    Read,
+    ReduceOp,
+    Reduction,
+    Reshape,
+    Write,
 )
 from .constraints import (
     Constraint,
@@ -65,16 +66,17 @@ def get_vector_shape(
 
 def _get_symbolic_shape_and_vector_shapes(
     custom: CustomOp,
-    aliases: dict[IndexSymbol, SymbolicAlias],
-    hw_constraint: HardwareConstraint,
 ):
-    # When the memory type has symbolic aliases, use the memory type
-    # as it includes the aliased variables.
-    symbolic_shape = custom.register_type.symbolic_shape
+    register_shape = custom.register_type.symbolic_shape
     vector_shapes = custom.vector_shapes
-    if any([x in custom.memory_type.symbolic_shape for x in aliases]):
-        symbolic_shape = custom.memory_type.symbolic_shape
-    return symbolic_shape, vector_shapes
+    memory_shape = custom.memory_type.symbolic_shape
+    # Check to see if the memory shape does not match with the vector shapes.
+    if not set(memory_shape).issubset(set(vector_shapes.keys())):
+        return register_shape, vector_shapes
+    # Pick the shape with the most dimensions.
+    if len(memory_shape) > len(register_shape):
+        return memory_shape, vector_shapes
+    return register_shape, vector_shapes
 
 
 def partition_strided_operators(trace: CapturedTrace, constraints: list[Constraint]):
@@ -111,8 +113,6 @@ def partition_strided_operators(trace: CapturedTrace, constraints: list[Constrai
         return False
 
     strided_operators = trace.walk(has_strided_access)
-    hw_constraint = [c for c in constraints if isinstance(c, HardwareConstraint)][0]
-    aliases = {c.source: c for c in constraints if isinstance(c, SymbolicAlias)}
     for operator in strided_operators:
         custom = get_custom(operator)
         simplified_index = {
@@ -120,9 +120,7 @@ def partition_strided_operators(trace: CapturedTrace, constraints: list[Constrai
             for dim in custom.index
         }
 
-        symbolic_shape, vector_shapes = _get_symbolic_shape_and_vector_shapes(
-            custom, aliases, hw_constraint
-        )
+        symbolic_shape, vector_shapes = _get_symbolic_shape_and_vector_shapes(custom)
 
         shape = get_vector_shape(vector_shapes, symbolic_shape)
         elements_per_thread = subs_idxc(custom.elements_per_thread)
@@ -335,7 +333,7 @@ def set_derived_index(trace):
             worklist.append((inp, new_index))
 
 
-def verify_nodes(trace: CapturedTrace):
+def verify_nodes(trace: CapturedTrace, constraints: list[Constraint]):
     """
     Verify that all the valid nodes have their index and vector shapes set.
     """
@@ -347,9 +345,19 @@ def verify_nodes(trace: CapturedTrace):
             custom, IterArg
         ):
             continue
-        if isinstance(custom, (Output, Reduction)):
+        if isinstance(custom, (Output, NestedRegionOp)):
             continue
         assert custom.index, f"Index not set for node {custom.fx_node}: {custom}"
+        if not custom.vector_shapes:
+            # If vector_shapes is not set, see if it can be derived from the hardware constraints.
+            hw_constraint = get_hardware_constraint(constraints)
+            update_vector_shapes = [
+                dim for dim in custom.index if dim in hw_constraint.vector_shapes
+            ]
+            if update_vector_shapes:
+                custom.vector_shapes = {}
+                for dim in update_vector_shapes:
+                    custom.vector_shapes[dim] = hw_constraint.vector_shapes[dim]
         assert custom.vector_shapes, f"Vector shapes not set for node {custom.fx_node}: {custom}"
 
 
@@ -368,7 +376,7 @@ def set_node_indices(trace: CapturedTrace, constraints: list[Constraint]):
     set_thread_dependent_index(constraints, mma_index, trace)
     set_derived_index(trace)
     resolve_thread_shapes(trace, constraints)
-    verify_nodes(trace)
+    verify_nodes(trace, constraints)
 
 
 def compute_stride(
@@ -698,7 +706,7 @@ def propagate_index(
         source, source_index, source_vector_shapes = sources.pop(0)
         if source in visited:
             continue
-        if not isinstance(source, (Reduction, MMA)):
+        if not isinstance(source, (NestedRegionOp, MMA)):
             if not should_update_index(
                 source, source_index, source_vector_shapes, symbolic_constraints
             ):

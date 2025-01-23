@@ -14,6 +14,10 @@ from iree.turbine.kernel.wave.utils import (
 from iree.turbine.kernel.wave.templates.decode_attention import (
     get_decode_attention_kernels,
 )
+from iree.turbine.kernel.wave.templates.paged_decode_attention import (
+    get_paged_decode_attention_kernels,
+    paged_decode_attention_shape,
+)
 import torch
 import sympy
 import math
@@ -1080,3 +1084,98 @@ def test_attention_bias():
         # CHECK-COUNT-4:            {{.*}} = arith.addf
         # CHECK-COUNT-8:            {{.*}} = gpu.shuffle xor {{.*}}
         # CHECK-COUNT-8:            {{.*}} = amdgpu.mfma
+
+
+@run_test
+def test_paged_flash_decoding():
+    shape = paged_decode_attention_shape(
+        num_query_heads=128,
+        num_kv_heads=4,
+        head_size=32,
+        head_size_kv=32,
+        block_size=64,
+        num_seqs=8,
+        kv_lens=100,
+    )
+    num_kv_splits = 8
+    k_shape = (shape.num_seqs, shape.kv_lens, shape.num_kv_heads, shape.head_size)
+    v_shape = (shape.num_seqs, shape.kv_lens, shape.num_kv_heads, shape.head_size_kv)
+    q_shape = (shape.num_seqs, shape.num_query_heads, shape.head_size)
+    o_shape = (shape.num_seqs, shape.num_query_heads, shape.head_size_kv)
+    logits_shape = (num_kv_splits, shape.num_seqs, shape.head_size_kv, shape.kv_lens)
+    logits_max_shape = (num_kv_splits, shape.num_seqs, shape.head_size_kv)
+    block_table_shape = (shape.num_seqs, shape.kv_lens)
+    mfma_variant = tkw.MMAType.F32_16x16x16_F16
+    (
+        phase_0,
+        phase_1,
+        hyperparams_0,
+        hyperparams_1,
+    ) = get_paged_decode_attention_kernels(
+        shape, mfma_variant, num_kv_splits, k_shape, v_shape, block_table_shape
+    )
+
+    torch.manual_seed(0)
+    q = torch.randn(q_shape, dtype=torch.float16)
+    k = torch.randn(k_shape, dtype=torch.float16)
+    v = torch.randn(v_shape, dtype=torch.float16)
+    logits = torch.zeros(logits_shape, dtype=torch.float32)
+    logits_max = torch.zeros(logits_max_shape, dtype=torch.float32)
+    output = torch.zeros(o_shape, dtype=torch.float32)
+
+    with tk.gen.TestLaunchContext(
+        hyperparams_0,
+        canonicalize=True,
+        run=False,
+        run_bench=False,
+        schedule=False,
+        use_scheduling_barriers=False,
+    ):
+        print(phase_0(q, k, v, logits, logits_max).module_op)
+
+    # CHECK:                func.func @phase_0
+    # CHECK-COUNT-4:           vector.load
+    # CHECK:                   scf.for
+    # CHECK-COUNT-3:                vector.maskedload
+    # CHECK-COUNT-8:                vector.store
+    # CHECK-COUNT-8:                vector.load
+    # CHECK-COUNT-16:               amdgpu.mfma
+    # CHECK-COUNT-4:                gpu.shuffle
+    # CHECK-COUNT-2:                arith.subf
+    # CHECK-COUNT-2:                math.exp2
+    # CHECK-COUNT-8:                arith.subf
+    # CHECK-COUNT-8:                math.exp2
+    # CHECK-COUNT-4:                gpu.shuffle
+    # TODO: Remove gathers for performance
+    # CHECK-COUNT-2:                vector.gather
+    # CHECK-COUNT-8:                vector.store
+    # CHECK-COUNT-8:                vector.load
+    # CHECK-COUNT-16:                amdgpu.mfma
+    # CHECK-COUNT-2:          arith.divf
+    # CHECK-COUNT-2:          math.log2
+    # CHECK-COUNT-18:         vector.store
+
+    with tk.gen.TestLaunchContext(
+        hyperparams_1,
+        canonicalize=True,
+        run=False,
+        run_bench=False,
+        schedule=False,
+        use_scheduling_barriers=False,
+    ):
+        print(phase_1(logits, logits_max, output).module_op)
+
+    # CHECK:            func.func @phase_1
+    # CHECK:               scf.for
+    # CHECK-COUNT-2:           vector.load
+    # CHECK-COUNT-1:           arith.maximumf
+    # CHECK-COUNT-1:           arith.subf
+    # CHECK-COUNT-1:           math.exp2
+    # CHECK-COUNT-1:           arith.subf
+    # CHECK-COUNT-1:           math.exp2
+    # CHECK-COUNT-1:           arith.mulf
+    # CHECK-COUNT-1:           arith.addf
+    # CHECK-COUNT-2:           arith.mulf
+    # CHECK-COUNT-1:           arith.addf
+    # CHECK-COUNT-1:      arith.divf
+    # CHECK-COUNT-1:      vector.store

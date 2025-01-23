@@ -7,7 +7,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Optional, Callable
 from sympy import ceiling, Piecewise, floor
 
 from .._support.indexing import IndexExpr, IndexSymbol, IndexSequence
@@ -46,6 +46,8 @@ class MMAType(Enum):
     # Intrinsics introduced in CDNA1
     F32_16x16x16_F16 = 0x1020
     F32_32x32x8_F16 = 0x1021
+    F32_16x16x32_K8_F16 = 0x1022
+    F32_32x32x16_K8_F16 = 0x1023
     I32_16x16x16_I8 = 0x10C0
     I32_32x32x8_I8 = 0x10C1
 
@@ -132,18 +134,111 @@ class HardwareConstraint(Constraint):
                 return (32, 32, 8)
             case (
                 MMAType.F32_16x16x32_F8
+                | MMAType.F32_16x16x32_K8_F16
                 | MMAType.F32_16x16x32_K4_F8
                 | MMAType.I32_16x16x32_I8
             ):
                 return (16, 16, 32)
             case (
                 MMAType.F32_32x32x16_F8
+                | MMAType.F32_32x32x16_K8_F16
                 | MMAType.F32_32x32x16_K4_F8
                 | MMAType.I32_32x32x16_I8
             ):
                 return (32, 32, 16)
             case _:
                 return ()
+
+    def mma_index_offset(self, mma_type: Optional[MMAType]):
+        lane = self.linearized_thread_id % self.threads_per_wave
+        if mma_type == None:
+            mma_type = self.mma_type
+        match mma_type:
+            # (M x K, N x K) -> M x N
+            case MMAType.F32_16x16x16_F16 | MMAType.I32_16x16x16_I8:
+                offset = [
+                    Piecewise(
+                        (lane % 16, ~MMA_ACC),
+                        (4 * floor(lane / 16), MMA_ACC),
+                    ),  # M
+                    lane % 16,  # N
+                    4 * floor(lane / 16),  # K
+                ]
+            case MMAType.F32_32x32x8_F16 | MMAType.I32_32x32x8_I8:
+                offset = [
+                    Piecewise(
+                        (lane % 32, ~MMA_ACC),
+                        (
+                            (8 * floor(GPR_NUM / 4) % 32)
+                            + 4 * floor(lane / 32)
+                            + (GPR_NUM % 4),
+                            MMA_ACC,
+                        ),
+                    ),  # M
+                    lane % 32,  # N
+                    4 * floor(lane / 32),  # K
+                ]
+            case (
+                MMAType.F32_16x16x32_F8
+                | MMAType.F32_16x16x32_K8_F16
+                | MMAType.F32_16x16x32_K4_F8
+                | MMAType.I32_16x16x32_I8
+            ):
+                offset = [
+                    Piecewise(
+                        (lane % 16, ~MMA_ACC), (4 * floor(lane / 16), MMA_ACC)
+                    ),  # M
+                    lane % 16,  # N
+                    8 * floor(lane / 16),  # K
+                ]
+                if mma_type == MMAType.F32_16x16x32_K4_F8:
+                    offset = [
+                        Piecewise(
+                            (lane % 16, ~MMA_ACC), (4 * floor(lane / 16), MMA_ACC)
+                        ),  # M
+                        lane % 16,  # N
+                        (16 * floor(GPR_NUM / 4))
+                        + 4 * floor(lane / 16)
+                        + (GPR_NUM % 4),  # K
+                    ]
+            case (
+                MMAType.F32_32x32x16_F8
+                | MMAType.F32_32x32x16_K8_F16
+                | MMAType.F32_32x32x16_K4_F8
+                | MMAType.I32_32x32x16_I8
+            ):
+                offset = [
+                    Piecewise(
+                        (lane % 32, ~MMA_ACC),
+                        (
+                            (8 * floor(GPR_NUM / 4) % 32)
+                            + 4 * floor(lane / 32)
+                            + (GPR_NUM % 4),
+                            MMA_ACC,
+                        ),
+                    ),  # M
+                    lane % 32,  # N
+                    8 * floor(lane / 32),  # K
+                ]
+                if mma_type == MMAType.F32_32x32x16_K4_F8:
+                    offset = [
+                        Piecewise(
+                            (lane % 32, ~MMA_ACC),
+                            (
+                                (8 * floor(GPR_NUM / 4) % 32)
+                                + 4 * floor(lane / 32)
+                                + (GPR_NUM % 4),
+                                MMA_ACC,
+                            ),
+                        ),  # M
+                        lane % 32,  # N
+                        (8 * floor(GPR_NUM / 4))
+                        + 4 * floor(lane / 32)
+                        + (GPR_NUM % 4),  # K
+                    ]
+            case _:
+                raise ValueError("Unsupported MMA type")
+        return offset
 
     @property
     def threads_per_block(self) -> tuple[int]:
@@ -197,17 +292,10 @@ class HardwareConstraint(Constraint):
         lane = self.linearized_thread_id % self.threads_per_wave
         if mma_type == None:
             mma_type = self.mma_type
+        offset = self.mma_index_offset(mma_type)
         match mma_type:
             # (M x K, N x K) -> M x N
             case MMAType.F32_16x16x16_F16 | MMAType.I32_16x16x16_I8:
-                offset = [
-                    Piecewise(
-                        (lane % 16, ~MMA_ACC),
-                        (4 * floor(lane / 16), MMA_ACC),
-                    ),  # M
-                    lane % 16,  # N
-                    4 * floor(lane / 16),  # K
-                ]
                 size = [
                     Piecewise((1, ~MMA_ACC), (4, MMA_ACC)),  # M
                     1,  # N
@@ -219,19 +307,6 @@ class HardwareConstraint(Constraint):
                     1,  # K
                 ]
             case MMAType.F32_32x32x8_F16 | MMAType.I32_32x32x8_I8:
-                offset = [
-                    Piecewise(
-                        (lane % 32, ~MMA_ACC),
-                        (
-                            (8 * floor(GPR_NUM / 4) % 32)
-                            + 4 * floor(lane / 32)
-                            + (GPR_NUM % 4),
-                            MMA_ACC,
-                        ),
-                    ),  # M
-                    lane % 32,  # N
-                    4 * floor(lane / 32),  # K
-                ]
                 size = [
                     Piecewise((1, ~MMA_ACC), (16, MMA_ACC)),  # M
                     1,  # N
@@ -244,16 +319,10 @@ class HardwareConstraint(Constraint):
                 ]
             case (
                 MMAType.F32_16x16x32_F8
+                | MMAType.F32_16x16x32_K8_F16
                 | MMAType.F32_16x16x32_K4_F8
                 | MMAType.I32_16x16x32_I8
             ):
-                offset = [
-                    Piecewise(
-                        (lane % 16, ~MMA_ACC), (4 * floor(lane / 16), MMA_ACC)
-                    ),  # M
-                    lane % 16,  # N
-                    8 * floor(lane / 16),  # K
-                ]
                 size = [
                     Piecewise((1, ~MMA_ACC), (4, MMA_ACC)),  # M
                     1,  # N
@@ -264,34 +333,12 @@ class HardwareConstraint(Constraint):
                     1,  # N
                     1,  # K
                 ]
-                if mma_type == MMAType.F32_16x16x32_K4_F8:
-                    offset = [
-                        Piecewise(
-                            (lane % 16, ~MMA_ACC), (4 * floor(lane / 16), MMA_ACC)
-                        ),  # M
-                        lane % 16,  # N
-                        (16 * floor(GPR_NUM / 4))
-                        + 4 * floor(lane / 16)
-                        + (GPR_NUM % 4),  # K
-                    ]
             case (
                 MMAType.F32_32x32x16_F8
+                | MMAType.F32_32x32x16_K8_F16
                 | MMAType.F32_32x32x16_K4_F8
                 | MMAType.I32_32x32x16_I8
             ):
-                offset = [
-                    Piecewise(
-                        (lane % 32, ~MMA_ACC),
-                        (
-                            (8 * floor(GPR_NUM / 4) % 32)
-                            + 4 * floor(lane / 32)
-                            + (GPR_NUM % 4),
-                            MMA_ACC,
-                        ),
-                    ),  # M
-                    lane % 32,  # N
-                    8 * floor(lane / 32),  # K
-                ]
                 size = [
                     Piecewise((1, ~MMA_ACC), (16, MMA_ACC)),  # M
                     1,  # N
@@ -302,22 +349,6 @@ class HardwareConstraint(Constraint):
                     1,  # N
                     1,  # K
                 ]
-                if mma_type == MMAType.F32_32x32x16_K4_F8:
-                    offset = [
-                        Piecewise(
-                            (lane % 32, ~MMA_ACC),
-                            (
-                                (8 * floor(GPR_NUM / 4) % 32)
-                                + 4 * floor(lane / 32)
-                                + (GPR_NUM % 4),
-                                MMA_ACC,
-                            ),
-                        ),  # M
-                        lane % 32,  # N
-                        (8 * floor(GPR_NUM / 4))
-                        + 4 * floor(lane / 32)
-                        + (GPR_NUM % 4),  # K
-                    ]
             case _:
                 raise ValueError("Unsupported MMA type")
         assert isinstance(
@@ -343,6 +374,8 @@ class WorkgroupConstraint(Constraint):
     dim: IndexExpr
     tile_size: IndexExpr
     workgroup_dim: int
+    apply_fn: Optional[Callable] = None
+    primary: Optional[bool] = True
 
     def __post_init__(self):
         self.wg_dim = None
@@ -362,12 +395,16 @@ class WorkgroupConstraint(Constraint):
         return ceiling(self.dim / self.tile_size)
 
     def apply(self) -> IndexSequence:
+        if self.apply_fn:
+            return IndexSequence(self.apply_fn(self.wg_dim), 1)
         return IndexSequence(self.wg_dim * self.tile_size, 1)
 
 
 def get_grid_shape(wg_constraints: list[WorkgroupConstraint]) -> list[IndexExpr]:
-    sorted_constraints = sorted(wg_constraints, key=lambda x: x.workgroup_dim)
-    # Currently not more than one constraint in each dimension supported.
+    sorted_constraints = sorted(
+        [x for x in wg_constraints if x.primary], key=lambda x: x.workgroup_dim
+    )
+    # Currently not more than one primary constraint in each dimension supported.
     if any(
         sorted_constraints[i].workgroup_dim == sorted_constraints[i + 1].workgroup_dim
         for i in range(len(sorted_constraints) - 1)
@@ -375,7 +412,7 @@ def get_grid_shape(wg_constraints: list[WorkgroupConstraint]) -> list[IndexExpr]
         raise ValueError(
             "Multiple constraints in the same workgroup dimension are currently not supported."
         )
-    grid: list[IndexExpr] = [constraint.count for constraint in wg_constraints]
+    grid: list[IndexExpr] = [constraint.count for constraint in sorted_constraints]
     return grid
 
 
@@ -392,12 +429,15 @@ class TilingConstraint(Constraint):
     dim: IndexExpr
     tile_size: IndexExpr
     induction_var: Optional[IndexExpr] = None
+    iters: Optional[IndexExpr] = None
 
     @property
     def count(self) -> IndexExpr:
         """
         Returns an expression for the number of iterations in the loop.
         """
+        if self.iters:
+            return self.iters
         return ceiling(self.dim / self.tile_size)
 
     def apply(self) -> IndexSequence:
@@ -451,14 +491,46 @@ def get_constrained_shape(
 ) -> tuple[IndexExpr]:
     """
     Given a shape, workgroup and tiling constraints, returns the shape
-    of the distributed and tiled tensor.
+    of the distributed and tiled tensor. The shape is determined using the following
+    criteria:
+    0. If no workgroup or tiling constraints are provided, the original shape is used.
+    1. If only workgroup constraints are provided, the shape is determined by the
+       tile size of the workgroup constraints.
+    2. If only tiling constraints are provided, the shape is determined by the
+       tile size of the tiling constraints.
+    3. If both workgroup and tiling constraints are provided, the shape is determined
+       from the tiling constraints*.
+    * By choosing tiling constraints, the shared memory used will be less but we will
+      not be able to coalesce global memory accesses (minimize_global_loads). If instead
+      we choose workgroup constraints, we will be able to coalesce global memory accesses
+      but will use more shared memory.
+      We choose tiling constraints over workgroup constraints because workgroup constraints
+      and tiling constraints will only be used when we cannot coalesce global memory
+      accesses because of constraints like dynamic read indices for block tables in
+      paged attention.
+      To enable workgroup constraints instead, we will additionally need to remove induction
+      variables from the global read and shared write indices and ensure that they get
+      hoisted out of the loop.
     """
     constrained_shape = list(shape)
+    all_same_type = lambda x, type: all(
+        isinstance(constraint, type) for constraint in x
+    )
     for i, dim in enumerate(shape):
-        for constraint in constraints:
-            if isinstance(constraint, WorkgroupConstraint) or isinstance(
-                constraint, TilingConstraint
-            ):
-                if dim == constraint.dim:
-                    constrained_shape[i] = constraint.tile_size
+        dim_constraints = [
+            constraint
+            for constraint in constraints
+            if isinstance(constraint, (WorkgroupConstraint, TilingConstraint))
+            and dim == constraint.dim
+        ]
+        if not dim_constraints:
+            continue
+        if all_same_type(dim_constraints, WorkgroupConstraint) or all_same_type(
+            dim_constraints, TilingConstraint
+        ):
+            constrained_shape[i] = dim_constraints[0].tile_size
+            continue
+        constrained_shape[i] = [
+            x.tile_size for x in dim_constraints if isinstance(x, TilingConstraint)
+        ][0]
     return tuple(constrained_shape)

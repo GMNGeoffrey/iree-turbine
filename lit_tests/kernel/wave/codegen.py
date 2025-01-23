@@ -594,6 +594,190 @@ def test_read_write_dynamic_mapping_chain():
 
 
 @run_test
+def test_read_write_dynamic_symbol():
+    S = tkl.sym.S
+    constraints: list[tkw.Constraint] = [
+        tkw.HardwareConstraint(
+            threads_per_wave=64,
+            waves_per_block=(1, 1, 1),
+            vector_shapes={M: 1, N: 1, S: 1},
+        )
+    ]
+    constraints += [tkw.WorkgroupConstraint(M, BLOCK_M, 0)]
+    constraints += [tkw.WorkgroupConstraint(N, BLOCK_N, 1)]
+    constraints += [tkw.WaveConstraint(M, BLOCK_M)]
+    constraints += [tkw.WaveConstraint(N, BLOCK_N)]
+
+    i = tkw.IndexMapping.iterator(0)
+    j = tkw.IndexMapping.iterator(1)
+    mapping = tkw.IndexMapping(
+        num_iterators=2,
+        inputs={S: S, N: j},
+        outputs={S: i, N: j},
+        dynamic_val_mappings={S: i, N: j},
+    )
+
+    @tkw.wave(constraints)
+    def test_dyn_symbol(
+        a: tkl.Memory[S, N, ADDRESS_SPACE, tkl.f16],
+        off: tkl.Memory[M, N, ADDRESS_SPACE, tkl.i32],
+        b: tkl.Memory[M, N, ADDRESS_SPACE, tkl.f16],
+    ):
+        offset = tkw.read(off, elements_per_thread=1)
+        tkw.set_symbol(S, offset)
+        res = tkw.read(
+            a,
+            mapping=mapping,
+            elements_per_thread=1,
+        )
+        tkw.write(res, b, elements_per_thread=1)
+
+    with codegen_test_context(
+        canonicalize=True,
+        dynamic_symbols=[S],
+        additional_symbols={BLOCK_M: 1, BLOCK_N: 1},
+    ):
+        a = torch.randn(16, 16, dtype=torch.float16)
+        off = torch.randint(16, (16, 16), dtype=torch.int32)
+        b = torch.zeros(16, 16, dtype=torch.float16)
+        print(test_dyn_symbol(a, off, b).module_op)
+
+        # CHECK-LABEL:    func.func @test_dyn_symbol
+        #  CHECK-SAME:      (%[[ARG0:.*]]: !stream.binding, %[[ARG1:.*]]: !stream.binding, %[[ARG2:.*]]: !stream.binding, %[[ARG3:.*]]: index)
+        #   CHECK-DAG:      %[[C0:.*]] = arith.constant 0 : index
+        #       CHECK:      %[[A2:.*]] = stream.binding.subspan %[[ARG1]][%[[C0]]] : !stream.binding -> memref<16x16xi32, strided<[16, 1], offset: ?>>
+        #       CHECK:      %[[O1:.*]] = vector.load %[[A2]][%[[M:.*]], %[[N:.*]]] : memref<16x16xi32, strided<[16, 1], offset: ?>>, vector<1xi32>
+        #       CHECK:      %[[O2:.*]] = arith.index_cast %[[O1]] : vector<1xi32> to vector<1xindex>
+        #       CHECK:      %[[O3:.*]] = vector.extract %[[O2]][0] : index from vector<1xindex>
+        #       CHECK:      %[[A1:.*]] = stream.binding.subspan %[[ARG0]][%[[C0]]] : !stream.binding -> memref<?x16xf16, strided<[16, 1], offset: ?>>{%arg3}
+        #       CHECK:      %[[RES:.*]] = vector.load %[[A1]][%[[O3]], %[[N]]] : memref<?x16xf16, strided<[16, 1], offset: ?>>, vector<1xf16>
+        #       CHECK:      %[[A3:.*]] = stream.binding.subspan %[[ARG2]][%[[C0]]] : !stream.binding -> memref<16x16xf16, strided<[16, 1], offset: ?>>
+        #       CHECK:      vector.store %[[RES]], %[[A3]][%[[M]], %[[N]]] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<1xf16>
+
+
+@run_test
+def test_read_write_dynamic_symbol_expr():
+    S = tkl.sym.S
+    constraints: list[tkw.Constraint] = [
+        tkw.HardwareConstraint(
+            threads_per_wave=64,
+            waves_per_block=(1, 1, 1),
+            vector_shapes={M: 1, N: 1, S: 1},
+        )
+    ]
+    constraints += [tkw.WorkgroupConstraint(M, BLOCK_M, 0)]
+    constraints += [tkw.WorkgroupConstraint(N, BLOCK_N, 1)]
+    constraints += [tkw.WaveConstraint(M, BLOCK_M)]
+    constraints += [tkw.WaveConstraint(N, BLOCK_N)]
+
+    i = tkw.IndexMapping.iterator(0)
+    j = tkw.IndexMapping.iterator(1)
+    mapping = tkw.IndexMapping(
+        num_iterators=2,
+        inputs={S: S, N: j},
+        outputs={S: i, N: j},
+        dynamic_val_mappings={S: i, N: j},
+    )
+
+    @tkw.wave(constraints)
+    def test_dyn_expr(
+        a: tkl.Memory[S, N, ADDRESS_SPACE, tkl.f16],
+        off: tkl.Memory[M, N, ADDRESS_SPACE, tkl.i32],
+        b: tkl.Memory[M, N, ADDRESS_SPACE, tkl.f16],
+    ):
+        offset = tkw.read(off, elements_per_thread=1)
+        offset = tkw.apply_expr(offset, lambda a: M - a - 1)
+        tkw.set_symbol(S, offset)
+        res = tkw.read(
+            a,
+            mapping=mapping,
+            elements_per_thread=1,
+        )
+        tkw.write(res, b, elements_per_thread=1)
+
+    with codegen_test_context(
+        canonicalize=True,
+        dynamic_symbols=[S],
+        additional_symbols={BLOCK_M: 1, BLOCK_N: 1},
+    ):
+        a = torch.randn(16, 16, dtype=torch.float16)
+        off = torch.randint(16, (16, 16), dtype=torch.int32)
+        b = torch.zeros(16, 16, dtype=torch.float16)
+        print(test_dyn_expr(a, off, b).module_op)
+
+        # CHECK-LABEL:    func.func @test_dyn_expr
+        #  CHECK-SAME:      (%[[ARG0:.*]]: !stream.binding, %[[ARG1:.*]]: !stream.binding, %[[ARG2:.*]]: !stream.binding, %[[ARG3:.*]]: index)
+        #   CHECK-DAG:      %[[CST:.*]] = arith.constant dense<15> : vector<1xindex>
+        #   CHECK-DAG:      %[[C0:.*]] = arith.constant 0 : index
+        #       CHECK:      %[[A2:.*]] = stream.binding.subspan %[[ARG1]][%[[C0]]] : !stream.binding -> memref<16x16xi32, strided<[16, 1], offset: ?>>
+        #       CHECK:      %[[O1:.*]] = vector.load %[[A2]][%[[M:.*]], %[[N:.*]]] : memref<16x16xi32, strided<[16, 1], offset: ?>>, vector<1xi32>
+        #       CHECK:      %[[O2:.*]] = arith.index_cast %[[O1]] : vector<1xi32> to vector<1xindex>
+        #       CHECK:      %[[O3:.*]] = arith.subi %[[CST]], %[[O2]] : vector<1xindex>
+        #       CHECK:      %[[O4:.*]] = vector.extract %[[O3]][0] : index from vector<1xindex>
+        #       CHECK:      %[[A1:.*]] = stream.binding.subspan %[[ARG0]][%[[C0]]] : !stream.binding -> memref<?x16xf16, strided<[16, 1], offset: ?>>{%arg3}
+        #       CHECK:      %[[RES:.*]] = vector.load %[[A1]][%[[O4]], %[[N]]] : memref<?x16xf16, strided<[16, 1], offset: ?>>, vector<1xf16>
+        #       CHECK:      %[[A3:.*]] = stream.binding.subspan %[[ARG2]][%[[C0]]] : !stream.binding -> memref<16x16xf16, strided<[16, 1], offset: ?>>
+        #       CHECK:      vector.store %[[RES]], %[[A3]][%[[M]], %[[N]]] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<1xf16>
+
+
+@run_test
+def test_read_write_conditional():
+    constraints: list[tkw.Constraint] = [
+        tkw.HardwareConstraint(
+            threads_per_wave=64,
+            waves_per_block=(1, 1, 1),
+            vector_shapes={M: 1, N: 1},
+        )
+    ]
+    constraints += [tkw.WorkgroupConstraint(M, BLOCK_M, 0)]
+    constraints += [tkw.WorkgroupConstraint(N, BLOCK_N, 1)]
+    constraints += [tkw.WaveConstraint(M, BLOCK_M)]
+    constraints += [tkw.WaveConstraint(N, BLOCK_N)]
+
+    @tkw.wave(constraints)
+    def test_conditional(
+        a: tkl.Memory[M, N, ADDRESS_SPACE, tkl.f16],
+        mask: tkl.Memory[M, N, ADDRESS_SPACE, tkl.i32],
+        b: tkl.Memory[M, N, ADDRESS_SPACE, tkl.f16],
+    ):
+        res = tkw.read(a, elements_per_thread=1)
+        cond = tkw.read(mask, elements_per_thread=1)
+
+        cond = tkw.apply_expr(cond, lambda a: a > 0)
+
+        @tkw.conditional(cond)
+        def then():
+            tkw.write(res, b, elements_per_thread=1)
+
+    with codegen_test_context(
+        canonicalize=True,
+        additional_symbols={BLOCK_M: 1, BLOCK_N: 1},
+    ):
+        a = torch.randn(16, 16, dtype=torch.float16)
+        mask = torch.randint(2, (16, 16), dtype=torch.int32)
+        b = torch.zeros(16, 16, dtype=torch.float16)
+        print(test_conditional(a, mask, b).module_op)
+
+        # CHECK-LABEL:    func.func @test_conditional
+        #  CHECK-SAME:      (%[[ARG0:.*]]: !stream.binding, %[[ARG1:.*]]: !stream.binding, %[[ARG2:.*]]: !stream.binding)
+        #   CHECK-DAG:      %[[CST:.*]] = arith.constant dense<0> : vector<1xindex>
+        #   CHECK-DAG:      %[[FALSE:.*]] = arith.constant false
+        #   CHECK-DAG:      %[[C0:.*]] = arith.constant 0 : index
+        #       CHECK:      %[[A1:.*]] = stream.binding.subspan %[[ARG0]][%[[C0]]] : !stream.binding -> memref<16x16xf16, strided<[16, 1], offset: ?>>
+        #       CHECK:      %[[RES:.*]] = vector.load %[[A1]][%[[M:.*]], %[[N:.*]]] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<1xf16>
+        #       CHECK:      %[[A2:.*]] = stream.binding.subspan %[[ARG1]][%[[C0]]] : !stream.binding -> memref<16x16xi32, strided<[16, 1], offset: ?>>
+        #       CHECK:      %[[O1:.*]] = vector.load %[[A2]][%[[M]], %[[N]]] : memref<16x16xi32, strided<[16, 1], offset: ?>>, vector<1xi32>
+        #       CHECK:      %[[O2:.*]] = arith.index_cast %[[O1]] : vector<1xi32> to vector<1xindex>
+        #       CHECK:      %[[O3:.*]] = arith.cmpi sgt, %[[O2]], %[[CST]] : vector<1xindex>
+        #       CHECK:      %[[O4:.*]] = vector.extract %[[O3]][0] : i1 from vector<1xi1>
+        #       CHECK:      %[[O5:.*]] = arith.cmpi ne, %[[O4]], %[[FALSE]] : i1
+        #       CHECK:      scf.if %[[O5]] {
+        #       CHECK:        %[[A3:.*]] = stream.binding.subspan %[[ARG2]][%[[C0]]] : !stream.binding -> memref<16x16xf16, strided<[16, 1], offset: ?>>
+        #       CHECK:        vector.store %[[RES]], %[[A3]][%[[M]], %[[N]]] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<1xf16>
+        #       CHECK:      }
+
+
+@run_test
 def test_dynamic_copy():
     constraints: list[tkw.Constraint] = [
         tkw.HardwareConstraint(
