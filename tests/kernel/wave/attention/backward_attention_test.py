@@ -1026,14 +1026,14 @@ def get_attention_bwd_dq_kernel(
         v: tkl.Memory[B, K2_kvs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         do: tkl.Memory[B, M_qs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         lse: tkl.Memory[B, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        D: tkl.Memory[B, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        dq: tkl.Memory[B, M_qs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # D: tkl.Memory[B, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # dq: tkl.Memory[B, M_qs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         s: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
         s_sub: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         p: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
-        ds: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # ds: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         dp: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
-        dp_sub: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # dp_sub: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
     ):
 
         # TODO(#364): Workaround for missing non-reduction loop. This needs to
@@ -1045,7 +1045,6 @@ def get_attention_bwd_dq_kernel(
         def loop_q_seq_len(dummy_prev: tkl.Register[B, tkl.f16]):
             k_j = tkw.read(k, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
             q_i = tkw.read(q, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
-
 
             s_acc = tkl.Register[B, K2_kvs, M_qs, tkl.f32](0.0)
             s_ij = tkw.mma(k_j, q_i, s_acc)
@@ -1070,24 +1069,24 @@ def get_attention_bwd_dq_kernel(
             # and dp is used later in the kernel iff we multiply p_ij and
             # dp_ij_sub to compute ds_ij.
             tkw.write(dp_ij, dp, mapping=flip_k2_m_write_mapping, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
-            dp_ij = tkw.permute(dp_ij, [B, M_qs, K2_kvs])
-            D_i = tkw.read(D, elements_per_thread=1)
-            dp_ij_sub = tkw.cast(dp_ij, tkl.f16) - D_i
-            tkw.write(dp_ij_sub, dp_sub, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            # dp_ij = tkw.permute(dp_ij, [B, M_qs, K2_kvs])
+            # D_i = tkw.read(D, elements_per_thread=1)
+            # dp_ij_sub = tkw.cast(dp_ij, tkl.f16) - D_i
+            # tkw.write(dp_ij_sub, dp_sub, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
 
-            ds_ij = p_ij * dp_ij_sub
-            tkw.write(ds_ij, ds, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            # ds_ij = p_ij * dp_ij_sub
+            # tkw.write(ds_ij, ds, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
 
-            # permuting doesn't work here. We need to read it in directly in the correct layout.
-            # k_j_for_dq = tkw.permute(k_j, [B, K1_qkd, K2_kvs])
-            k_j_for_dq = tkw.read(
-                k,
-                mapping=flip_k2_k1_read_mapping,
-                elements_per_thread=MFMA_INPUT_ELS_PER_THREAD,
-            )
-            dq_prev = tkw.read(dq, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
-            dq_i = tkw.mma(ds_ij, k_j_for_dq, tkw.cast(dq_prev, tkl.f32)) # B x M x K2 @ B x K1 x K2
-            tkw.write(dq_i, dq, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            # # permuting doesn't work here. We need to read it in directly in the correct layout.
+            # # k_j_for_dq = tkw.permute(k_j, [B, K1_qkd, K2_kvs])
+            # k_j_for_dq = tkw.read(
+            #     k,
+            #     mapping=flip_k2_k1_read_mapping,
+            #     elements_per_thread=MFMA_INPUT_ELS_PER_THREAD,
+            # )
+            # dq_prev = tkw.read(dq, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            # dq_i = tkw.mma(ds_ij, k_j_for_dq, tkw.cast(dq_prev, tkl.f32)) # B x M x K2 @ B x K1 x K2
+            # tkw.write(dq_i, dq, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
 
             return dummy_prev
 
@@ -1326,11 +1325,11 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
     compile_config_dq = {
         "waves_per_eu": 2,
         "denorm_fp_math_f32": "preserve-sign",
-        # "print_ir_before": ["first", "expand_graph"],
-        # "print_ir_after": ["last"],
+        "print_ir_before": ["expand_graph"],
+        "print_ir_after": ["last"],
         # "print_signature": True,
-        # "print_pretty_mlir": True,
-        # "print_indices": True,
+        "print_pretty_mlir": True,
+        "print_indices": True,
     }
 
     with tk.gen.TestLaunchContext(
@@ -1361,14 +1360,14 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
             v,
             do,
             lse,
-            D,
-            dq,
+            # D,
+            # dq,
             s,
             s_sub,
             p,
-            ds,
+            # ds,
             dp,
-            dp_sub,
+            # dp_sub,
         )
 
         if dump_generated_mlir:
@@ -1420,7 +1419,6 @@ def small_tensor_string(t, name="", row_limit=50, col_limit=150, min_important_v
     row_width = len(" ".join(f_entry(d, width) for d in t[0].tolist()))
 
     if row_width > col_limit:
-        print(f"Fallback 2: {row_width=} {col_limit=}")
         return fallback()
 
     rows = []
