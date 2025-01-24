@@ -32,8 +32,7 @@ from ..common.shapes import get_test_shapes
 
 # Pytest seems to change its mind about what order it does parametrizations in.
 # Before it was top to bottom.
-shapes_16x16x16 = reversed(
-    [
+shapes_16x16x16 =[
         (8, 128, 128, 64, 256),
         (40, 1024, 64, 64, 1024),
         (2, 64, 128, 32, 256),
@@ -44,7 +43,6 @@ shapes_16x16x16 = reversed(
         (2, 16, 16, 16, 16),
         (1, 16, 16, 16, 16),
     ]
-)
 
 
 def get_param_id(val):
@@ -52,6 +50,15 @@ def get_param_id(val):
         return "x".join(str(el) for el in val)
     elif isinstance(val, MMAType):
         return f"MMA_{val.name}"
+
+def attention_causal_torch_ops_ref(q, k, v, scale=1):
+    s = scale * torch.matmul(q, k.transpose(-1, -2))
+    mask = torch.full_like(s, float("-inf")).triu(diagonal=1)
+    s += mask
+    p = torch.softmax(s, dim=-1)
+    o = torch.matmul(p, v)
+
+    return o, s, p
 
 
 def get_causal_attention_kernel(
@@ -112,6 +119,7 @@ def get_causal_attention_kernel(
         q: tkl.Memory[B, M, K1, GLOBAL_ADDRESS_SPACE, tkl.f16],
         k: tkl.Memory[B, K2, K1, GLOBAL_ADDRESS_SPACE, tkl.f16],
         v: tkl.Memory[B, K2, N, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        s: tkl.Memory[B, M, K2, GLOBAL_ADDRESS_SPACE, tkl.f32],
         o: tkl.Memory[B, M, N, GLOBAL_ADDRESS_SPACE, tkl.f16],
     ):
         init_m = tkl.Register[B, M, tkl.f32](-1e6)
@@ -124,12 +132,13 @@ def get_causal_attention_kernel(
             l_prev: tkl.Register[B, M, tkl.f32],
             o_ij: tkl.Register[B, N, M, tkl.f32],
         ):
-            s_acc = tkl.Register[B, K2, M, tkl.f32](0.0)
+            s_acc = tkl.Register[B, K2, M, tkl.f32](float("-inf"))
             log2e = tkl.Register[B, M, tkl.f32](1.44269504089)
             q_i = tkw.read(q, elements_per_thread=MMA_INPUT_ELS_PER_THREAD)
             k_j = tkw.read(k, elements_per_thread=MMA_INPUT_ELS_PER_THREAD)
             s_ij = tkw.mma(k_j, q_i, s_acc)
             s_ij = tkw.permute(s_ij, target_shape=[B, M, K2])
+            tkw.write(s_ij, s, elements_per_thread=MMA_OUTPUT_ELS_PER_THREAD) # Debugging output
             m_ij = tkw.max(s_ij, m_prev, dim=K2)
             e_delta_max = tkw.exp2(log2e * (m_prev - m_ij))
             p_ij = tkw.exp2(log2e * (s_ij - m_ij))
@@ -154,9 +163,9 @@ def get_causal_attention_kernel(
         MMA_INPUT_ELS_PER_THREAD: get_mfma_load_elems_per_thread(mfma_variant),
         MMA_OUTPUT_ELS_PER_THREAD: get_mfma_store_elems_per_thread(mfma_variant),
         BLOCK_B: 1,
-        BLOCK_M: min(128, q_seq_len),
-        BLOCK_N: min(64, v_head_dim),
-        BLOCK_K2: min(64, kv_seq_len),
+        BLOCK_M: vec_size,
+        BLOCK_N: vec_size,
+        BLOCK_K2: vec_size,
         B: batch,
         M: q_seq_len,
         N: v_head_dim,
@@ -200,9 +209,12 @@ def testCausalAttention(shape, mfma_variant, request):
     #     (batch * kv_seq_len * v_head_dim), dtype=torch.float16
     # ).reshape((batch, kv_seq_len, v_head_dim)) / 64
 
-    o_ref = F.scaled_dot_product_attention(
-        q, k, v, attn_mask=None, is_causal=False, scale=1
+    o_torch_builtin_ref = F.scaled_dot_product_attention(
+        q, k, v, attn_mask=None, is_causal=True, scale=1
     )
+
+    o_torch_ops_ref, s_torch_ops_ref, p_torch_ops_ref = attention_causal_torch_ops_ref(q, k, v, scale=1)
+    assert_close(o_torch_ops_ref, o_torch_builtin_ref, **tols)
 
     causal_attention, hyperparams = get_causal_attention_kernel(
         batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len, mfma_variant
@@ -230,11 +242,13 @@ def testCausalAttention(shape, mfma_variant, request):
         use_scheduling_barriers=enable_scheduling_barriers,
     ):
         output = device_zeros(batch, q_seq_len, v_head_dim, dtype=torch.float16)
-        mb = causal_attention(q, k, v, output)
+        s = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float32)
+        mb = causal_attention(q, k, v, s, output)
 
         if dump_generated_mlir:
             filename = f"out/wave_attention_causal_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb.module_op.get_asm())
 
-        assert_close(output, o_ref, **tols)
+        assert_close(s, s_torch_ops_ref, **tols, check_dtype=False)
+        assert_close(output, o_torch_builtin_ref, **tols)
