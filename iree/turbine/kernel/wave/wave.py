@@ -531,11 +531,11 @@ class LaunchableWave(Launchable):
             log2e_matches = re.findall(r"(%\w+) = arith.constant dense<1\.442380e\+00> : vector<(\d+)x(f\d+)>", asm)
             for m in log2e_matches:
                 ssa, v_size, dtype = m
-                asm = re.sub(rf"{ssa}\b", f"log2e_{v_size}v{dtype}", asm)
+                asm = re.sub(rf"{ssa}\b", f"%log2e_{v_size}v{dtype}", asm)
             zero_matches = re.findall(r"(%\w+) = arith.constant dense<0\.0*e\+00> : vector<(\d+)x(f\d+)>", asm)
             for m in zero_matches:
                 ssa, v_size, dtype = m
-                asm = re.sub(rf"{ssa}\b", f"c0_{v_size}v{dtype}", asm)
+                asm = re.sub(rf"{ssa}\b", f"%c0_{v_size}v{dtype}", asm)
             print("Prettified MLIR:\n", asm)
 
         return mb, trace, exe, kernel_sig, entrypoint_name

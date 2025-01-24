@@ -320,8 +320,8 @@ def get_mma_dimensional_mapping(
             k = ((set(lhs_shape) & set(rhs_shape)) - set(acc_shape)).pop()
         except KeyError as e:
             raise RuntimeError(f"{node}:\n{lhs_shape=}\n{rhs_shape=}\n{acc_shape=}\n{custom.lhs=}\n{custom.rhs=}\n{custom.acc=}") from e
-        if lhs_shape[-1] != k or rhs_shape[-1] != k:
-            raise RuntimeError(f"{node}: MMA shared dimension must be last\n{lhs_shape=}\n{rhs_shape=}\n{k=}\n{custom}")
+        if lhs_shape[-1] != k or rhs_shape[-1] != k or lhs_shape[-2] != m or rhs_shape[-2] != n:
+            raise RuntimeError(f"{node}: Invalid MMA shapes\n{lhs_shape=}\n{rhs_shape=}\n{acc_shape=}\n{m=}, {n=}, {k=}\n{custom}")
 
         if custom not in mapping:
             mapping[custom] = {}

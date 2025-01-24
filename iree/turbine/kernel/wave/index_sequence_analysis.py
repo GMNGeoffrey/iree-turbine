@@ -371,11 +371,16 @@ def print_node_indices(trace: CapturedTrace):
     print()
 
 def set_node_indices(trace: CapturedTrace, constraints: list[Constraint]):
-    mma_index = get_mma_dimensional_mapping(trace, get_hardware_constraint(constraints))
-    trace.walk(partial(set_thread_independent_index, constraints))
-    set_thread_dependent_index(constraints, mma_index, trace)
-    set_derived_index(trace)
-    resolve_thread_shapes(trace, constraints)
+    try:
+        mma_index = get_mma_dimensional_mapping(trace, get_hardware_constraint(constraints))
+        trace.walk(partial(set_thread_independent_index, constraints))
+        set_thread_dependent_index(constraints, mma_index, trace)
+        set_derived_index(trace)
+        resolve_thread_shapes(trace, constraints)
+    except:
+        print("Failure in set node indices")
+        print_node_indices(trace)
+        raise
     verify_nodes(trace, constraints)
 
 

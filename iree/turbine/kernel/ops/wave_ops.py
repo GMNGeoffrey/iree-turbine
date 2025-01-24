@@ -1324,7 +1324,7 @@ class Reduction(NestedRegionOp):
                         for val in return_vals
                     ]
                     if isinstance(return_vals, (Sequence))
-                    else [return_vals.index]
+                    else [get_custom(return_vals).index]
                 )
 
     @index.setter
