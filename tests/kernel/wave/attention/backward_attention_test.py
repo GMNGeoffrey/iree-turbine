@@ -310,8 +310,8 @@ def get_attention_fwd_kernel(
     # Address space (for GPU, shared(1) or global(0))
     ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
     # Other hyperparameters
-    LOAD_ELEMS_PER_THREAD = tkl.sym.LOAD_ELEMS_PER_THREAD
-    STORE_ELEMS_PER_THREAD = tkl.sym.STORE_ELEMS_PER_THREAD
+    MMA_INPUT_ELS_PER_THREAD = tkl.sym.MMA_INPUT_ELS_PER_THREAD
+    MMA_OUTPUT_ELS_PER_THREAD = tkl.sym.MMA_OUTPUT_ELS_PER_THREAD
 
     # Expose user-constraints
     constraints: list[tkw.Constraint] = [tkw.WorkgroupConstraint(M_qs, BLOCK_M_r_qs, 0)]
@@ -339,7 +339,7 @@ def get_attention_fwd_kernel(
     i = tkw.IndexMapping.iterator(0)
     j = tkw.IndexMapping.iterator(1)
     k = tkw.IndexMapping.iterator(2)
-    o_mapping = tkw.IndexMapping(
+    flip_n_m_write_mapping = tkw.IndexMapping(
         num_iterators=3,
         inputs={B: i, N_vd: j, M_qs: k},
         outputs={B: i, M_qs: k, N_vd: j},
@@ -355,9 +355,9 @@ def get_attention_fwd_kernel(
         o: tkl.Memory[B, M_qs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         lse: tkl.Memory[B, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
     ):
-        init_o = tkl.Register[B, N_vd, M_qs, tkl.f32](0.0)
-        init_l = tkl.Register[B, M_qs, tkl.f32](0.0)
         init_m = tkl.Register[B, M_qs, tkl.f32](-1e6)
+        init_l = tkl.Register[B, M_qs, tkl.f32](0.0)
+        init_o = tkl.Register[B, N_vd, M_qs, tkl.f32](0.0)
 
         @tkw.reduction(K2_kvs, init_args=[init_m, init_l, init_o])
         def repeat(
@@ -371,17 +371,17 @@ def get_attention_fwd_kernel(
         ]:
             s_acc = tkl.Register[B, K2_kvs, M_qs, tkl.f32](0.0)
             log2e = tkl.Register[B, M_qs, tkl.f32](1.44269504089)
-            q_i = tkw.read(q, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-            k_j = tkw.read(k, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            q_i = tkw.read(q, elements_per_thread=MMA_INPUT_ELS_PER_THREAD)
+            k_j = tkw.read(k, elements_per_thread=MMA_INPUT_ELS_PER_THREAD)
             s_ij = tkw.mma(k_j, q_i, s_acc)
             s_ij = tkw.permute(s_ij, target_shape=[B, M_qs, K2_kvs])
-            tkw.write(s_ij, s, elements_per_thread=STORE_ELEMS_PER_THREAD)
+            tkw.write(s_ij, s, elements_per_thread=MMA_OUTPUT_ELS_PER_THREAD)
             m_ij = tkw.max(s_ij, m_prev, dim=K2_kvs)
             e_delta_max = tkw.exp2(log2e * (m_prev - m_ij))
             p_ij = tkw.exp2(log2e * (s_ij - m_ij))
             l_init = e_delta_max * l_prev
             l_ij = tkw.sum(p_ij, l_init, dim=K2_kvs)
-            v_j = tkw.read(v, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            v_j = tkw.read(v, elements_per_thread=MMA_INPUT_ELS_PER_THREAD)
             o_init = e_delta_max * o_prev
             o_ij = tkw.mma(v_j, tkw.cast(p_ij, tkl.f16), o_init)
             return m_ij, l_ij, o_ij
@@ -392,16 +392,16 @@ def get_attention_fwd_kernel(
         tkw.write(
             tkw.cast(o_i, tkl.f16),
             o,
-            mapping=o_mapping,
-            elements_per_thread=STORE_ELEMS_PER_THREAD,
+            mapping=flip_n_m_write_mapping,
+            elements_per_thread=MMA_OUTPUT_ELS_PER_THREAD,
         )
         lse_i = m_i + (tkw.log2(l_i) / log2e)
         tkw.write(tkw.cast(lse_i, tkl.f16), lse, elements_per_thread=1)
 
     hyperparams = {
         ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
-        LOAD_ELEMS_PER_THREAD: get_mfma_load_elems_per_thread(mfma_variant),
-        STORE_ELEMS_PER_THREAD: get_mfma_store_elems_per_thread(mfma_variant),
+        MMA_INPUT_ELS_PER_THREAD: get_mfma_load_elems_per_thread(mfma_variant),
+        MMA_OUTPUT_ELS_PER_THREAD: get_mfma_store_elems_per_thread(mfma_variant),
         BLOCK_B: 1,
         BLOCK_M_r_qs: vec_size,
         BLOCK_N_vd: vec_size,
@@ -1230,7 +1230,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         mb_bwd_dv = attention_bwd_dv(q, k, do, lse, dv, s, p)
 
         if dump_generated_mlir:
-            filename = f"wave_attention_bwd_dv_{'x'.join(map(str, shape))}.mlir"
+            filename = f"out/wave_attention_bwd_dv_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb_bwd_dv.module_op.get_asm())
             print(f"IR dumped to {filename}")
@@ -1296,7 +1296,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         )
 
         if dump_generated_mlir:
-            filename = f"wave_attention_bwd_dk_{'x'.join(map(str, shape))}.mlir"
+            filename = f"out/wave_attention_bwd_dk_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb_bwd_dk.module_op.get_asm())
             print(f"IR dumped to {filename}")
@@ -1371,7 +1371,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         )
 
         if dump_generated_mlir:
-            filename = f"wave_attention_bwd_dq_{'x'.join(map(str, shape))}.mlir"
+            filename = f"out/wave_attention_bwd_dq_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb_bwd_dq.module_op.get_asm())
             print(f"IR dumped to {filename}")
@@ -1608,7 +1608,7 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
         mb_fwd = attention_fwd(q, k, v.transpose(-1, -2), s, o, lse)
 
         if dump_generated_mlir:
-            filename = f"wave_attention_fwd_{'x'.join(map(str, shape))}.mlir"
+            filename = f"out/wave_attention_fwd_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb_fwd.module_op.get_asm())
             print(f"IR dumped to {filename}")
@@ -1693,7 +1693,7 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
         )
 
         if dump_generated_mlir:
-            filename = f"wave_attention_bwd_{'x'.join(map(str, shape))}.mlir"
+            filename = f"out/wave_attention_bwd_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb_bwd.module_op.get_asm())
             print(f"IR dumped to {filename}")
@@ -2275,7 +2275,7 @@ def testReproNonSquareMMAWithElementwise(mfma_variant):
         )
 
         if dump_generated_mlir:
-            filename = f"wave_attention_repro_non_square_subtract_2_{'x'.join(map(str, shape))}.mlir"
+            filename = f"out/wave_attention_repro_non_square_subtract_2_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb_bwd.module_op.get_asm())
             print(f"IR dumped to {filename}")
