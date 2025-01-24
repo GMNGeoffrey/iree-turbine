@@ -339,7 +339,7 @@ def get_attention_fwd_kernel(
     i = tkw.IndexMapping.iterator(0)
     j = tkw.IndexMapping.iterator(1)
     k = tkw.IndexMapping.iterator(2)
-    o_mapping = tkw.IndexMapping(
+    flip_n_m_write_mapping = tkw.IndexMapping(
         num_iterators=3,
         inputs={B: i, N_vd: j, M_qs: k},
         outputs={B: i, M_qs: k, N_vd: j},
@@ -355,9 +355,9 @@ def get_attention_fwd_kernel(
         o: tkl.Memory[B, M_qs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         lse: tkl.Memory[B, M_qs, GLOBAL_ADDRESS_SPACE, tkl.f16],
     ):
-        init_o = tkl.Register[B, N_vd, M_qs, tkl.f32](0.0)
-        init_l = tkl.Register[B, M_qs, tkl.f32](0.0)
         init_m = tkl.Register[B, M_qs, tkl.f32](-1e6)
+        init_l = tkl.Register[B, M_qs, tkl.f32](0.0)
+        init_o = tkl.Register[B, N_vd, M_qs, tkl.f32](0.0)
 
         @tkw.reduction(K2_kvs, init_args=[init_m, init_l, init_o])
         def repeat(
@@ -392,7 +392,7 @@ def get_attention_fwd_kernel(
         tkw.write(
             tkw.cast(o_i, tkl.f16),
             o,
-            mapping=o_mapping,
+            mapping=flip_n_m_write_mapping,
             elements_per_thread=STORE_ELEMS_PER_THREAD,
         )
         lse_i = m_i + (tkw.log2(l_i) / log2e)
@@ -1230,7 +1230,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         mb_bwd_dv = attention_bwd_dv(q, k, do, lse, dv, s, p)
 
         if dump_generated_mlir:
-            filename = f"wave_attention_bwd_dv_{'x'.join(map(str, shape))}.mlir"
+            filename = f"out/wave_attention_bwd_dv_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb_bwd_dv.module_op.get_asm())
             print(f"IR dumped to {filename}")
@@ -1296,7 +1296,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         )
 
         if dump_generated_mlir:
-            filename = f"wave_attention_bwd_dk_{'x'.join(map(str, shape))}.mlir"
+            filename = f"out/wave_attention_bwd_dk_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb_bwd_dk.module_op.get_asm())
             print(f"IR dumped to {filename}")
@@ -1371,7 +1371,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         )
 
         if dump_generated_mlir:
-            filename = f"wave_attention_bwd_dq_{'x'.join(map(str, shape))}.mlir"
+            filename = f"out/wave_attention_bwd_dq_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb_bwd_dq.module_op.get_asm())
             print(f"IR dumped to {filename}")
@@ -1608,7 +1608,7 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
         mb_fwd = attention_fwd(q, k, v.transpose(-1, -2), s, o, lse)
 
         if dump_generated_mlir:
-            filename = f"wave_attention_fwd_{'x'.join(map(str, shape))}.mlir"
+            filename = f"out/wave_attention_fwd_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb_fwd.module_op.get_asm())
             print(f"IR dumped to {filename}")
@@ -1693,7 +1693,7 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
         )
 
         if dump_generated_mlir:
-            filename = f"wave_attention_bwd_{'x'.join(map(str, shape))}.mlir"
+            filename = f"out/wave_attention_bwd_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb_bwd.module_op.get_asm())
             print(f"IR dumped to {filename}")
@@ -2275,7 +2275,7 @@ def testReproNonSquareMMAWithElementwise(mfma_variant):
         )
 
         if dump_generated_mlir:
-            filename = f"wave_attention_repro_non_square_subtract_2_{'x'.join(map(str, shape))}.mlir"
+            filename = f"out/wave_attention_repro_non_square_subtract_2_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
                 f.write(mb_bwd.module_op.get_asm())
             print(f"IR dumped to {filename}")
