@@ -5,7 +5,6 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 import pytest
 
-
 # List of all test shapes for end to end tests.
 _e2e_test_shapes = {}
 
@@ -23,8 +22,14 @@ _e2e_test_shapes["evoformer"] = [
     (1, 512, 256, 8, 8, 256, 8),
 ]
 
+
 def get_test_shapes(test_name: str):
     assert test_name in _e2e_test_shapes, f"Unknown test name: {test_name}"
-    shapes = [pytest.param(s, id="x".join(map(str, s))) for s in _e2e_test_shapes[test_name]]
-    shapes += [pytest.param(s, id="x".join(map(str, s))+"-perf", marks=pytest.mark.perf_only) for s in _e2e_test_shapes[test_name]]
+    shapes = [
+        pytest.param(s, id="x".join(map(str, s))) for s in _e2e_test_shapes[test_name]
+    ]
+    shapes += [
+        pytest.param(s, id="x".join(map(str, s)) + "-perf", marks=pytest.mark.perf_only)
+        for s in _e2e_test_shapes[test_name]
+    ]
     return shapes

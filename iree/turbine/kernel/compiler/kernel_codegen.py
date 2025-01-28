@@ -320,21 +320,6 @@ class KernelSignature:
     def __repr__(self):
         parts = []
         for b in self.bindings:
-            part = repr(b.reference)
-            if b.name:
-                part = f"{b.name}: {part} {b.binding_type.name}"
-            if b.binding_type == BindingType.KERNEL_BUFFER:
-                part += f" ({b.kernel_buffer_type.usage.name} {b.kernel_buffer_type})"
-            if b.binding_type == BindingType.SYMBOL_VALUE:
-                part += f" ({b.symbol_type})"
-
-            parts.append(part)
-        return f"{self.__class__}({', '.join(parts)})"
-
-    def __str__(self):
-        parts = []
-        for b in self.bindings:
-            part = repr(b.reference)
             name = b.name or repr(b.reference)
 
             type_str = b.binding_type.name
@@ -344,7 +329,7 @@ class KernelSignature:
                 type_str += f".{b.symbol_type}"
 
             parts.append(f"{name}: {type_str}")
-        return f"Signature({', '.join(parts)})"
+        return f"KernelSignature({', '.join(parts)})"
 
 
 class BoundKernelSignature(ABC):

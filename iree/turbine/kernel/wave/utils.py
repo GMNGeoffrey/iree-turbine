@@ -3,6 +3,8 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+import functools
+
 from ..compiler.ir import (
     builtin_d,
     InsertionPoint,
@@ -17,19 +19,22 @@ from .._support.tracing import CapturedTrace
 from .._support.indexing import IndexExpr, IndexingContext, IndexSymbol, IndexSequence
 from ..lang.global_symbols import *
 from ..ops.wave_ops import (
-    get_custom,
-    Output,
-    Write,
-    MMA,
-    CustomOp,
-    Reduction,
-    GetResult,
-    ExtractSlice,
-    IterArg,
-    Reshape,
-    Read,
-    SetSymbol,
     ApplyExpr,
+    Conditional,
+    CustomOp,
+    ExtractSlice,
+    GetResult,
+    IterArg,
+    MMA,
+    NestedRegionOp,
+    Output,
+    Placeholder,
+    Read,
+    Reduction,
+    Reshape,
+    SetSymbol,
+    Write,
+    get_custom,
 )
 from ..lang.wave_types import IndexMapping
 from .constraints import (
@@ -153,9 +158,13 @@ def print_trace(trace: CapturedTrace, custom_print: bool = True):
     then using our custom node format.
     """
     # The root graph is at the back so we print the subgraphs in reverse order
-    for subgraph in reversed(list(trace.region_graph.subgraphs.values())):
-        print(subgraph)
+    for name, subgraph in reversed(list(trace.region_graph.subgraphs.items())):
+        if name == trace.root_graph:
+            name = f"{name} [root]"
+        print(f"{name}:\n")
+        print_graph(subgraph)
         if custom_print:
+            print("Custom format:")
             for node in subgraph.nodes:
                 print(get_custom(node))
 
@@ -166,7 +175,6 @@ def print_subgraph(trace: CapturedTrace, subgraph_name: str, custom_print: bool 
     The graphs are printed first in the torch printing format and
     then using our custom node format.
     """
-    # The root graph is at the back so we print the subgraphs in reverse order
     for name, subgraph in trace.region_graph.subgraphs.items():
         if name == subgraph_name:
             print(subgraph)
@@ -182,24 +190,43 @@ def DCE(trace: CapturedTrace):
     Repeats this process till no more operators can be removed.
     """
 
-    def is_removable_operator(node: fx.Node) -> bool:
+    def is_global_write(node: fx.Node) -> bool:
         custom = get_custom(node)
-        idxc = IndexingContext.current()
-        is_global_write = isinstance(custom, Write) and (
-            custom.type.address_space.subs(idxc.subs) == GLOBAL_ADDRESS_SPACE
-            or custom.type.address_space.subs(idxc.subs)
-            == tkl.AddressSpace.GLOBAL_MEMORY.value
+        return isinstance(custom, Write) and (
+            subs_idxc(custom.type.address_space)
+            in [GLOBAL_ADDRESS_SPACE, tkl.AddressSpace.GLOBAL_MEMORY.value]
         )
 
-        return (
-            not custom.users
-            and not isinstance(custom, (Output, SetSymbol, ApplyExpr))
-            and not is_global_write
-        )
+    def has_nested_writes(node: fx.Node) -> bool:
+        custom = get_custom(node)
+        if not isinstance(custom, NestedRegionOp):
+            return False
+
+        subgraph = custom.graph.subgraphs[custom.subgraph_name]
+        for node in subgraph.nodes:
+            if is_global_write(node) or has_nested_writes(node):
+                return True
+
+        return False
+
+    def is_removable_operator(node: fx.Node) -> bool:
+        custom = get_custom(node)
+
+        if (
+            custom.users
+            or isinstance(custom, (Output, SetSymbol, ApplyExpr))
+            or is_global_write(node)
+        ):
+            return False
+
+        if has_nested_writes(node):
+            return False
+
+        return True
 
     while removable_nodes := trace.walk(is_removable_operator):
         for node in removable_nodes:
-            get_custom(node).graph.erase_node(node)
+            get_custom(node).erase()
 
 
 def remove_chained_getresult(trace: CapturedTrace):
@@ -285,7 +312,9 @@ def is_reshape_needed(
             if node_vector_shapes[dim] != vector_shapes[dim]:
                 return True
         except KeyError as e:
-            raise RuntimeError(f"{node=}\n{node_vector_shapes=}\n{vector_shapes=}\n{dim=}") from e
+            raise RuntimeError(
+                f"{node=}\n{node_vector_shapes=}\n{vector_shapes=}\n{dim=}"
+            ) from e
     return False
 
 
@@ -319,9 +348,18 @@ def get_mma_dimensional_mapping(
         try:
             k = ((set(lhs_shape) & set(rhs_shape)) - set(acc_shape)).pop()
         except KeyError as e:
-            raise RuntimeError(f"{node}:\n{lhs_shape=}\n{rhs_shape=}\n{acc_shape=}\n{custom.lhs=}\n{custom.rhs=}\n{custom.acc=}") from e
-        if lhs_shape[-1] != k or rhs_shape[-1] != k or lhs_shape[-2] != m or rhs_shape[-2] != n:
-            raise RuntimeError(f"{node}: Invalid MMA shapes\n{lhs_shape=}\n{rhs_shape=}\n{acc_shape=}\n{m=}, {n=}, {k=}\n{custom}")
+            raise RuntimeError(
+                f"{node}:\n{lhs_shape=}\n{rhs_shape=}\n{acc_shape=}\n{custom.lhs=}\n{custom.rhs=}\n{custom.acc=}"
+            ) from e
+        if (
+            lhs_shape[-1] != k
+            or rhs_shape[-1] != k
+            or lhs_shape[-2] != m
+            or rhs_shape[-2] != n
+        ):
+            raise RuntimeError(
+                f"{node}: Invalid MMA shapes\n{lhs_shape=}\n{rhs_shape=}\n{acc_shape=}\n{m=}, {n=}, {k=}\n{custom}"
+            )
 
         if custom not in mapping:
             mapping[custom] = {}
@@ -362,7 +400,9 @@ def get_mma_dimensional_mapping(
                     custom_reshape.vector_shapes = custom.vector_shapes
                     custom.update_arg(arg_index, reshape)
             except RuntimeError as e:
-                raise RuntimeError(f"{arg_index=}\n{arg=}\n{mma=}\n{prev_mma=}\n{arg_index=}") from e
+                raise RuntimeError(
+                    f"{arg_index=}\n{arg=}\n{mma=}\n{prev_mma=}\n{arg_index=}"
+                ) from e
 
     def find_mma_in_slice(node: CustomOp) -> Optional[MMA]:
         """
@@ -523,7 +563,9 @@ def _inplace_invoke(vm_context, device, entry_function, inputs, outputs, dynamic
     try:
         vm_context.invoke(entry_function, arg_list, ret_list)
     except ValueError as e:
-        raise RuntimeError(f"Error invoking IREE\n{entry_function}\n{arg_list=}\ninputs: {', '.join([str(i.shape) for i in inputs])}\noutputs: {', '.join([str(o.shape) for o in outputs])}") from e
+        raise RuntimeError(
+            f"Error invoking IREE\n{entry_function}\n{arg_list=}\ninputs: {', '.join([str(i.shape) for i in inputs])}\noutputs: {', '.join([str(o.shape) for o in outputs])}"
+        ) from e
 
 
 def _read_file(name, mode):
@@ -841,6 +883,18 @@ def get_users(
                 if output_idx in get_results:
                     users.append(get_results[output_idx])
             continue
+        if isinstance(custom, Conditional):
+            if node == custom.condition:
+                users.append(user)
+            else:
+                subgraph = custom.graph.subgraphs[custom.subgraph_name]
+                var = custom.get_captured_fx_node(subgraph, node)
+                assert var is not None, "Invalid captured var"
+                for u in var.users:
+                    users.append(u)
+
+            continue
+
         users.append(user)
     return users, reduction
 
@@ -865,7 +919,9 @@ def get_inputs(
             print(f"GetResult node {custom} has no value\n{node.args=}\n{custom.graph}")
         assert custom.value is not None, f"GetResult node {custom} has no value"
         reduction = get_custom(custom.value)
-        assert isinstance(reduction, Reduction), f"GetResult must be using a Reduction, but\n{custom}\nis using\n{reduction}"
+        assert isinstance(
+            reduction, Reduction
+        ), f"GetResult must be using a Reduction, but\n{custom}\nis using\n{reduction}"
         # Map get result to output
         reduction_subgraph = reduction.graph.subgraphs[reduction.subgraph_name]
         if len(reduction.init_args) == 1:
@@ -883,6 +939,17 @@ def get_inputs(
         # Default handling for other ops.
         for input in node.all_input_nodes:
             inputs.append(input)
+
+    def propagate(n):
+        c = get_custom(n)
+        if isinstance(c, Placeholder):
+            p = c.get_captured_fx_node()
+            if p is not None:
+                return p
+
+        return n
+
+    inputs = [propagate(i) for i in inputs]
     return inputs, reduction
 
 
@@ -1442,6 +1509,7 @@ def get_largest_index_and_size(indices: dict[IndexExpr, IndexSequence]):
     )
     return sorted_values[0][1:]
 
+
 def initialize_iter_args(trace: CapturedTrace) -> None:
     """
     Initializes the IterArgs in each reduction with an index
@@ -1457,3 +1525,10 @@ def initialize_iter_args(trace: CapturedTrace) -> None:
             if isinstance(custom, IterArg):
                 custom.iter_idx = count
                 count += 1
+
+
+def partial(func, *args, **kwargs):
+    """functools.partial but with function attributes copied to the partial function."""
+    partial_func = functools.partial(func, *args, **kwargs)
+    functools.update_wrapper(partial_func, func)
+    return partial_func

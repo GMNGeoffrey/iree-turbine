@@ -38,6 +38,8 @@ from .utils import (
     delinearize_index,
     _write_file,
     initialize_iter_args,
+    partial,
+    print_trace,
 )
 from .minimize_global_loads import minimize_global_loads
 from .decompose_reduce_ops import decompose_reduce_ops
@@ -316,91 +318,71 @@ class LaunchableWave(Launchable):
         kwargs,
         context: Optional[Context] = None,
         module_op: Optional[Operation] = None,
-    ) -> tuple[builder.ModuleBuilder, CapturedTrace, dispatch_codegen.StreamExecutable, kernel_codegen.KernelSignature, str]:
+    ) -> tuple[
+        builder.ModuleBuilder,
+        CapturedTrace,
+        dispatch_codegen.StreamExecutable,
+        kernel_codegen.KernelSignature,
+        str,
+    ]:
         compile_config = kwargs.get("compile_config", {})
         print_ir_after = compile_config.get("print_ir_after", [])
         print_ir_before = compile_config.get("print_ir_before", [])
+        if compile_config.get("print_trace_begin", False):
+            print(f"\n***Tracing kernel {self._name}***")
 
-        # Trace the function.
-        print(f"\n***Tracing kernel {self._name}***")
         trace = self._trace()
-        if "all" in print_ir_after or "all" in print_ir_before or "trace" in print_ir_after or "first" in print_ir_before:
-            print(f"After trace/Before first pass:\n{trace}\n")
-
-
-        graph_passes = [
-            initialize_iter_args,
-            self.create_induction_vars,
-            self.initialize_wave_constraints,
-            self.initialize_reductions,
-            self.initialize_symbolic_constraints,
-            self.initialize_workgroup_constraints,
-        ]
-        for p in graph_passes:
-            if "all" in print_ir_before or p.__name__ in print_ir_before:
-                print(f"Before {p.__name__}:\n{trace}\n")
-            try:
-                p(trace)
-            except Exception as e:
-                print(f"Error in pass: {p.__name__}")
-                print(trace)
-            if "all" in print_ir_after or p.__name__ in print_ir_after:
-                print(f"After {p.__name__}:\n{trace}\n")
+        if (
+            "all" in print_ir_after
+            or "all" in print_ir_before
+            or "trace" in print_ir_after
+            or "first" in print_ir_before
+        ):
+            print(f"***After trace/Before first pass***\n")
+            print_trace(trace)
 
         idxc = IndexingContext.current()
-        idxc.finalize()
-        #print(f"After finalize indexing context: {idxc}")
 
-        # Initialize Vector shapes
-        self.hardware_constraints[0].subs_vector_shapes(idxc.subs)
-        #print(f"Ater {self.hardware_constraints[0].subs_vector_shapes.__name__}: {self.hardware_constraints[0].vector_shapes}")
+        def finalize_indices():
+            idxc.finalize()
 
-        class CurryConstraints:
-            def __init__(self, graph_tform: Callable[[CapturedTrace, list[Constraint]], None], constraints: list[Constraint]):
-                self.graph_tform = graph_tform
-                self.constraints = constraints
-                self.__name__ = graph_tform.__name__
-
-            def __call__(self, graph: CapturedTrace):
-                self.graph_tform(graph, self.constraints)
-
-        def curry_constraints(graph_tform: Callable[[CapturedTrace, list[Constraint]], None]):
-            return CurryConstraints(graph_tform, self.constraints)
+        def substitute_vector_shapes():
+            self.hardware_constraints[0].subs_vector_shapes(idxc.subs)
 
         graph_passes = [
-            # Do type inference.
-            infer_types,
-            # Promote the placeholders to the appropriate address space.
-            curry_constraints(promote_placeholders),
-            # Set indices.
-            curry_constraints(set_node_indices),
+            partial(initialize_iter_args, trace),
+            partial(self.create_induction_vars, trace),
+            partial(self.initialize_wave_constraints, trace),
+            partial(self.initialize_reductions, trace),
+            partial(self.initialize_symbolic_constraints, trace),
+            partial(self.initialize_workgroup_constraints, trace),
+            finalize_indices,
+            substitute_vector_shapes,
+            partial(infer_types, trace),
+            partial(promote_placeholders, trace, self.constraints),
+            partial(set_node_indices, trace, self.constraints),
+            partial(expand_graph, trace, self.constraints),
+            partial(set_post_expansion_indices, trace, self.constraints),
+            partial(remove_chained_getresult, trace),
         ]
 
-        if compile_config.get("print_indices", False):
-            graph_passes.append(print_node_indices)
+        # Optimizations.
+        graph_passes += [
+            partial(decompose_vmma_ops, trace, self.constraints),
+            partial(hoist_loop_invariant_ops, trace, self.constraints),
+            partial(minimize_global_loads, trace, self.constraints),
+            partial(apply_shared_memory_indexing_corrections, trace, self.constraints),
+        ]
+
+        # Partition strided operators.
+        graph_passes += [
+            partial(partition_ops_with_gpr_offsets, trace, self.constraints),
+            partial(partition_strided_operators, trace, self.constraints),
+            partial(remove_chained_extractslice, trace),
+        ]
 
         graph_passes += [
-            # Expansion
-            curry_constraints(expand_graph),
-            # Set post expansion indices.
-            curry_constraints(set_post_expansion_indices),
-            # Clean up chains of GetResults
-            remove_chained_getresult,
-            # Optimizations.
-            curry_constraints(decompose_vmma_ops),
-            curry_constraints(hoist_loop_invariant_ops),
-            curry_constraints(minimize_global_loads),
-
-            # Apply shared memory indexing corrections.
-            curry_constraints(apply_shared_memory_indexing_corrections),
-
-            # Partition strided operators.
-            curry_constraints(partition_ops_with_gpr_offsets),
-            curry_constraints(partition_strided_operators),
-            remove_chained_extractslice,
-
-            # Decompose reduce Ops.
-            curry_constraints(decompose_reduce_ops),
+            partial(decompose_reduce_ops, trace, self.constraints, idxc.subs)
         ]
 
         # Schedule the reduction ops.
@@ -414,36 +396,38 @@ class LaunchableWave(Launchable):
         # [Manually resolve conflicts consistent with the PR]
         if kwargs.get("schedule", False):
             use_scheduling_barriers = kwargs.get("use_scheduling_barriers", False)
-            curried = functools.partial(schedule_graph, constraints=self.constraints, use_scheduling_barriers=use_scheduling_barriers)
-            curried.__name__ = schedule_graph.__name__
-            graph_passes.append(curried)
+            graph_passes.append(
+                partial(
+                    schedule_graph, trace, self.constraints, use_scheduling_barriers
+                )
+            )
 
-        # Align sizes to WG/Tile sizes
-        # This pass changes indexing keys, which can interfere with other passes,
-        # so it should be called close to the end of pipeline.
-        graph_passes.extend([
-            curry_constraints(align_index_sizes),
+        graph_passes += [
+            # Align sizes to WG/Tile sizes
+            # This pass changes indexing keys, which can interfere with other passes,
+            # so it should be called close to the end of pipeline.
+            partial(align_index_sizes, trace, self.constraints),
+            partial(add_shared_memory_barriers, trace),
+        ]
 
-            # Add shared memory barriers.
-            add_shared_memory_barriers,
-        ])
-
-        for i, p in enumerate(graph_passes):
+        for p in graph_passes:
             if "all" in print_ir_before or p.__name__ in print_ir_before:
-                print(f"Before {p.__name__}:\n{trace}\n")
+                print(f"***Before {p.__name__}***\n")
+                print_trace(trace)
             try:
-                p(trace)
-            except Exception as e:
-                print(f"Error in pass: {p.__name__}")
-                print(trace)
-                raise e
+                p()
+            except Exception:
+                print(f"Error in pass: {p.__name__}\n")
+                print_trace(trace)
+                raise
             if "all" in print_ir_after or p.__name__ in print_ir_after:
-                print(f"After {p.__name__}:\n{trace}\n")
+                print(f"***After {p.__name__}***\n")
+                print_trace(trace)
 
         if "all" in print_ir_after or "last" in print_ir_after:
             # Take advantage of Python leaking loop variables
-            print(f"After final pass {p.__name__}:\n{trace}\n")
-
+            print(f"***After final pass {p.__name__}***\n")
+            print_trace(trace)
 
         # Determine grid shape.
         self.grid_type.dims = [1, 1, 1]
@@ -472,7 +456,7 @@ class LaunchableWave(Launchable):
         kernel_sig.add_grid(self.grid_type)
         kernel_sig.determine_input_output_buffers(root_graph)
         if compile_config.get("print_signature", False):
-            print(f"Kernel signature: {kernel_sig}")
+            print(kernel_sig)
 
         mb = builder.ModuleBuilder(context=context, module_op=module_op)
         entrypoint_name = self._name
@@ -523,16 +507,25 @@ class LaunchableWave(Launchable):
             for i, b in enumerate(kernel_sig.kernel_buffer_bindings):
                 if b.name:
                     asm = re.sub(rf"%arg{i}\b", f"%arg_{b.name}", asm)
-                    arg_access = re.findall(rf"(%\d+) = stream.binding.subspan %arg_{b.name}\[%c0\]", asm)
+                    arg_access = re.findall(
+                        rf"(%\d+) = stream.binding.subspan %arg_{b.name}\[%c0\]", asm
+                    )
                     if len(arg_access) > 1:
-                        raise RuntimeError(f"Found more than one access of binding {b.name}")
+                        raise RuntimeError(
+                            f"Found more than one access of binding {b.name}"
+                        )
                     if arg_access:
                         asm = re.sub(rf"{arg_access[0]}\b", f"%{b.name}", asm)
-            log2e_matches = re.findall(r"(%\w+) = arith.constant dense<1\.442380e\+00> : vector<(\d+)x(f\d+)>", asm)
+            log2e_matches = re.findall(
+                r"(%\w+) = arith.constant dense<1\.442380e\+00> : vector<(\d+)x(f\d+)>",
+                asm,
+            )
             for m in log2e_matches:
                 ssa, v_size, dtype = m
                 asm = re.sub(rf"{ssa}\b", f"%log2e_{v_size}v{dtype}", asm)
-            zero_matches = re.findall(r"(%\w+) = arith.constant dense<0\.0*e\+00> : vector<(\d+)x(f\d+)>", asm)
+            zero_matches = re.findall(
+                r"(%\w+) = arith.constant dense<0\.0*e\+00> : vector<(\d+)x(f\d+)>", asm
+            )
             for m in zero_matches:
                 ssa, v_size, dtype = m
                 asm = re.sub(rf"{ssa}\b", f"%c0_{v_size}v{dtype}", asm)
