@@ -358,7 +358,9 @@ def verify_nodes(trace: CapturedTrace, constraints: list[Constraint]):
                 custom.vector_shapes = {}
                 for dim in update_vector_shapes:
                     custom.vector_shapes[dim] = hw_constraint.vector_shapes[dim]
-        assert custom.vector_shapes, f"Vector shapes not set for node {custom.fx_node}: {custom}"
+        assert (
+            custom.vector_shapes
+        ), f"Vector shapes not set for node {custom.fx_node}: {custom}"
 
 
 def print_node_indices(trace: CapturedTrace):
@@ -370,9 +372,12 @@ def print_node_indices(trace: CapturedTrace):
         print(f"{node_str:{width}}: {custom.index}, {custom.vector_shapes}")
     print()
 
+
 def set_node_indices(trace: CapturedTrace, constraints: list[Constraint]):
     try:
-        mma_index = get_mma_dimensional_mapping(trace, get_hardware_constraint(constraints))
+        mma_index = get_mma_dimensional_mapping(
+            trace, get_hardware_constraint(constraints)
+        )
         trace.walk(partial(set_thread_independent_index, constraints))
         set_thread_dependent_index(constraints, mma_index, trace)
         set_derived_index(trace)
@@ -780,7 +785,9 @@ def set_post_expansion_indices(trace: CapturedTrace, constraints: list[Constrain
                 try:
                     custom.index[dim].start += scale * custom.vector_shapes[dim]
                 except KeyError as e:
-                    raise RuntimeError(f"op index or vector shapes missing expanded dim {dim}:\n{custom.index}\n{custom.vector_shapes}\n{custom}")
+                    raise RuntimeError(
+                        f"op index or vector shapes missing expanded dim {dim}:\n{custom.index}\n{custom.vector_shapes}\n{custom}"
+                    )
         return False
 
     trace.walk(apply_offset)
@@ -797,9 +804,9 @@ def create_broadcast(
     Create a broadcast node for the given binary operator.
     """
     with binary_op.graph.inserting_before(binary_op.fx_node):
-        broadcasted = Broadcast(to_broadcast.fx_node, target_node.type.symbolic_shape).add_to_graph(
-            binary_op.graph
-        )
+        broadcasted = Broadcast(
+            to_broadcast.fx_node, target_node.type.symbolic_shape
+        ).add_to_graph(binary_op.graph)
         custom = get_custom(broadcasted)
         custom.vector_shapes = binary_op.vector_shapes
         custom.index = deepcopy(target_node.index)

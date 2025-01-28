@@ -136,7 +136,9 @@ def maximum(lhs: "Register", rhs: "Register") -> "Register":
     ...
 
 
-def broadcast(arg: "Register", target_shape: Sequence[IndexExpr]) -> "Register":
+def broadcast(
+    arg: "Register", target_shape: Optional[Sequence[IndexExpr | int]] = None
+) -> "Register":
     ...
 
 
