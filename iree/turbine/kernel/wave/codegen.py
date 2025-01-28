@@ -77,6 +77,7 @@ from ..ops.wave_ops import (
     set_symbol,
     shared_memory_barrier,
     shuffle,
+    tanh,
     write,
 )
 from ..lang.wave_types import IndexMapping, IndexSymbol
@@ -409,6 +410,23 @@ def gen_sympy_index(dynamics: dict[IndexSymbol, Value], expr: sympy.Expr) -> OpR
         if isinstance(val, _Rational):
             raise CodegenError(f"Rational is not supported yet in '{type(term)}'")
 
+    def _remove_denominators(lhs, rhs):
+        """
+        Converts     (z/x) < y -> z < x*y
+              or     z < (y/x) -> z*x < y
+              or (a/b) < (c/d) -> a*d < b*c
+        """
+        if isinstance(lhs, _Rational) and not isinstance(rhs, _Rational):
+            rhs = _mul(lhs.denominator, rhs)
+            lhs = lhs.numerator
+        if isinstance(rhs, _Rational) and not isinstance(lhs, _Rational):
+            lhs = _mul(rhs.denominator, lhs)
+            rhs = rhs.numerator
+        if isinstance(lhs, _Rational) and isinstance(rhs, _Rational):
+            rhs = _mul(lhs.denominator, rhs.numerator)
+            lhs = _mul(rhs.denominator, lhs.numerator)
+        return lhs, rhs
+
     def _get_const(val):
         if isinstance(val, int):
             return arith_d.constant(IndexType.get(), val)
@@ -463,11 +481,18 @@ def gen_sympy_index(dynamics: dict[IndexSymbol, Value], expr: sympy.Expr) -> OpR
                 numerator = _get_const(term.p)
                 denominator = _get_const(term.q)
                 stack.append(_Rational(numerator, denominator))
+            case sympy.LessThan():
+                rhs = stack.pop()
+                lhs = stack.pop()
+                if isinstance(rhs, _Rational) or isinstance(lhs, _Rational):
+                    lhs, rhs = _remove_denominators(lhs, rhs)
+                res = arith_d.cmpi(arith_d.CmpIPredicate.sle, *_broadcast(lhs, rhs))
+                stack.append(res)
             case sympy.StrictLessThan():
                 rhs = stack.pop()
                 lhs = stack.pop()
-                _enforce_non_rational(rhs, term)
-                _enforce_non_rational(lhs, term)
+                if isinstance(rhs, _Rational) or isinstance(lhs, _Rational):
+                    lhs, rhs = _remove_denominators(lhs, rhs)
                 res = arith_d.cmpi(arith_d.CmpIPredicate.slt, *_broadcast(lhs, rhs))
                 stack.append(res)
             case sympy.StrictGreaterThan():
@@ -1138,7 +1163,8 @@ def handle_binary_op(op):
                     f"{lhs=}\n"
                     f"{rhs=}\n"
                     f"lhs={get_custom(op.lhs)}\n"
-                    f"rhs={get_custom(op.rhs)}")
+                    f"rhs={get_custom(op.rhs)}"
+                )
 
             lhs = lhs.ir_value
             rhs = rhs.ir_value
@@ -1301,6 +1327,16 @@ def handle_abs(source: Value) -> OpResult:
     return abs
 
 
+@handle_unary_op(tanh)
+def handle_tanh(source: Value) -> OpResult:
+    element_type = get_type_or_element_type(source.type)
+    if _is_float_type(element_type):
+        result = math_d.tanh(source)
+    else:
+        raise ValidationError(f"Found unhandled operand type for tanh: {element_type}")
+    return result
+
+
 ###############################################################################
 # Control Flow ops
 ###############################################################################
@@ -1376,7 +1412,9 @@ def handle_reduction(emitter: WaveEmitter, node: fx.Node):
         # Add mapping for iter args.
         subgraph: fx.Graph = emitter.trace.get_subgraph(subgraph)
         iter_args: list[fx.Node] = get_custom(node).iter_args(subgraph)
-        assert len(iter_args) == len(forOp.inner_iter_args), f"Len of reduction and for op iter args must match, Reduction args: {iter_args}; For Op args: {[a.type for a in forOp.inner_iter_args]}"
+        assert len(iter_args) == len(
+            forOp.inner_iter_args
+        ), f"Len of reduction and for op iter args must match, Reduction args: {iter_args}; For Op args: {[a.type for a in forOp.inner_iter_args]}"
         for i, v in enumerate(forOp.inner_iter_args):
             emitter.bind_node_proxy(iter_args[i], IRProxyValue(v))
         captured_vars: list[fx.Node] = get_custom(node).captured_vars(subgraph)
@@ -1390,10 +1428,12 @@ def handle_reduction(emitter: WaveEmitter, node: fx.Node):
             cast_py_value(emitter, value).ir_value for value in flat_ret_values
         ]
         if len(flat_ret_values) != len(flat_init_args):
-            raise RuntimeError(f"Loop must have the same number of return values as init args, but got\n"
-                               f"{len(flat_ret_values)} vs {len(flat_init_args)}\n"
-                               f"{flat_ret_values=}\n"
-                               f"{flat_init_args=}\n")
+            raise RuntimeError(
+                f"Loop must have the same number of return values as init args, but got\n"
+                f"{len(flat_ret_values)} vs {len(flat_init_args)}\n"
+                f"{flat_ret_values=}\n"
+                f"{flat_init_args=}\n"
+            )
         scf_d.YieldOp(flat_ret_values)
 
     emitter.bind_node_proxies(node, [IRProxyValue(v) for v in forOp.results_])

@@ -126,6 +126,10 @@ def abs(src: "Register") -> "Register":
     ...
 
 
+def tanh(src: "Register") -> "Register":
+    ...
+
+
 def maximum(lhs: "Register", rhs: "Register") -> "Register":
     ...
 
@@ -162,7 +166,9 @@ def permute(src: "Register", target_shape: Sequence[IndexExpr]) -> "Register":
     ...
 
 
-def reshape(inputs: Sequence["Register"], target_vector_shape: dict[IndexSymbol, int]) -> "Register":
+def reshape(
+    inputs: Sequence["Register"], target_vector_shape: dict[IndexSymbol, int]
+) -> "Register":
     ...
 
 
@@ -292,7 +298,9 @@ def define_interface_op(op_name: str) -> Callable[[T], T]:
 def get_custom(node: fx.Node) -> "CustomOp":
     """Get the corresponding CustomOp for a given fx.Node."""
     if isinstance(node, CustomOp):
-        raise ValueError("Careful! You passed a custom op where an fx.Node was required.")
+        raise ValueError(
+            "Careful! You passed a custom op where an fx.Node was required."
+        )
         return node
     if not isinstance(node, fx.Node):
         raise ValueError(f"Expected an fx.Node but got {type(node)}")
@@ -721,6 +729,7 @@ class BinaryPyOp(CustomOp, ABC):
 @define_interface_op("exp2")
 @define_interface_op("reciprocal")
 @define_interface_op("abs")
+@define_interface_op("tanh")
 @define_py_op(operator.neg)
 @dataclass
 class UnaryPyOp(CustomOp, ABC):
@@ -1227,6 +1236,7 @@ class Reduction(NestedRegionOp):
     def handle(cls, graph: RegionGraph, *args, **kwargs):
         if not isinstance(graph, RegionGraph):
             raise TypeError("handle should be passed RegionGraph")
+
         def wrapper(f):
             with graph.subtracer() as subtracer:
                 subgraph_name, implicit_captures = subtracer.trace(f)
@@ -1507,7 +1517,9 @@ class GetResult(CustomOp):
             try:
                 self.type = src_type[self.res_idx]
             except Exception as e:
-                raise ValueError(f"{op=}\n{self.res_idx=}\n{self.value=}\n{src_type=}") from e
+                raise ValueError(
+                    f"{op=}\n{self.res_idx=}\n{self.value=}\n{src_type=}"
+                ) from e
         else:
             self.type = src_type
 
@@ -1678,7 +1690,10 @@ class ReduceOp(CustomOp, ABC):
         reduced_dims = [dims for dims in src_type.symbolic_shape if dims != self.dim]
         dst_type = Register[(*reduced_dims, src_type.dtype)]
         self.type = dst_type
-        if self.init is not None and get_custom(self.init).type.symbolic_shape != self.type.symbolic_shape:
+        if (
+            self.init is not None
+            and get_custom(self.init).type.symbolic_shape != self.type.symbolic_shape
+        ):
             raise ValueError(
                 f"Init type for {self.tkw_op_name} {get_custom(self.init).type.symbolic_shape} must match reduce type {self.type.symbolic_shape}"
                 f"\n{self}"
@@ -1785,7 +1800,9 @@ class Permute(CustomOp, ABC):
                 if k in src_shape
             }
         except KeyError as e:
-            raise RuntimeError(f"{self.arg=}\n{self.target_shape=}\n{index=}\n{src_to_target=}") from e
+            raise RuntimeError(
+                f"{self.arg=}\n{self.target_shape=}\n{index=}\n{src_to_target=}"
+            ) from e
         return permuted_index
 
 

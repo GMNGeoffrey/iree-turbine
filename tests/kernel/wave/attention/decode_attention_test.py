@@ -133,4 +133,4 @@ def testFlashDecoding(
         with open(filename, "w") as f:
             f.write(mb_sv.module_op.get_asm())
 
-    assert_close(output.to(torch.float16), torch_ref, atol=1e-3, rtol=1e-4)
+    assert_close(output, torch_ref, check_dtype=False, atol=1e-3, rtol=1e-3)

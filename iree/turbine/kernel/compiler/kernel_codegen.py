@@ -259,13 +259,34 @@ class KernelSignature:
         # Extract all placeholder nodes.
         placeholder_nodes = filter_fx_graph(graph, is_placeholder)
 
-        # def only_read_dependencies(node):
-        #     return all([isinstance(get_custom(x), Read) for x in node.users.keys()])
+        def get_users_recursive(node):
+            ret = []
+            for user in node.users.keys():
+                custom = get_custom(user)
+                if not isinstance(custom, NestedRegionOp):
+                    ret.append(user)
+                    continue
 
-        # def has_write_dependencies(node):
-        #     if len(node.users) == 0:
-        #         return False
-        #     return all([isinstance(get_custom(x), Write) for x in node.users.keys()])
+                subgraph = graph.subgraphs[custom.subgraph_name]
+                nested_placeholders = filter_fx_graph(subgraph, is_placeholder)
+                for nested in nested_placeholders:
+                    captured = get_custom(nested).get_captured_fx_node()
+                    if captured == node:
+                        ret += get_users_recursive(nested)
+
+            return ret
+
+        def only_read_dependencies(node):
+            return all(
+                [isinstance(get_custom(x), Read) for x in get_users_recursive(node)]
+            )
+
+        def any_write_dependencies(node):
+            if len(node.users) == 0:
+                return False
+            return any(
+                [isinstance(get_custom(x), Write) for x in get_users_recursive(node)]
+            )
 
         for node in placeholder_nodes:
             index = None
@@ -277,14 +298,12 @@ class KernelSignature:
                 continue
 
             # TODO: Match KernelBufferUsage to what bufferType that is expected on IREE.
-            # INPUT nodes are marked read-only which doesn't work if they're both read from and written to.
-            # Can't see reads within reductions. Give up and mark everything as an output
-            # usage = KernelBufferUsage.INPUT
-            # if has_write_dependencies(node):
+            usage = KernelBufferUsage.INPUT
+            if only_read_dependencies(node):
+                usage = KernelBufferUsage.INPUT
 
-            usage = KernelBufferUsage.OUTPUT
-            # elif only_read_dependencies(node):
-            #     usage = KernelBufferUsage.INPUT
+            if any_write_dependencies(node):
+                usage = KernelBufferUsage.OUTPUT
 
             # Create new Memory type with the correct usage
             memory_type = self.bindings[index].kernel_buffer_type
@@ -308,10 +327,10 @@ class KernelSignature:
                 part += f" ({b.kernel_buffer_type.usage.name} {b.kernel_buffer_type})"
             if b.binding_type == BindingType.SYMBOL_VALUE:
                 part += f" ({b.symbol_type})"
-            
+
             parts.append(part)
         return f"{self.__class__}({', '.join(parts)})"
-    
+
     def __str__(self):
         parts = []
         for b in self.bindings:
@@ -343,7 +362,9 @@ class BoundKernelSignature(ABC):
         try:
             binding = self._bindings_by_reference[reference]
         except KeyError:
-            pretty = '\n'.join(f"{k}: {v}" for k, v in self._bindings_by_reference.items())
+            pretty = "\n".join(
+                f"{k}: {v}" for k, v in self._bindings_by_reference.items()
+            )
             raise CodegenError(f"{reference} not in signature:\n{pretty}")
         return self.resolve(binding)
 
