@@ -36,25 +36,25 @@ default_tile_sizes = [(1, 1, 32, 1, None, 64, 32)]
 
 # From: https://github.com/microsoft/DeepSpeed/blob/master/tests/unit/ops/deepspeed4science/test_DS4Sci_EvoformerAttention.py
 def attention_reference(
-    q_input: torch.Tensor,      # B x BN x  M  x H x K1
-    k_input: torch.Tensor,      # B x BN x K2  x H x K1
-    v_input: torch.Tensor,      # B x BN x K2  x H x  N
-    biases: list[torch.Tensor], # B x BN x  1  x 1 x K2
-                                # B x  1 x  H  x M x K2
+    q_input: torch.Tensor,  # B x BN x  M  x H x K1
+    k_input: torch.Tensor,  # B x BN x K2  x H x K1
+    v_input: torch.Tensor,  # B x BN x K2  x H x  N
+    biases: list[torch.Tensor],  # B x BN x  1  x 1 x K2
+    # B x  1 x  H  x M x K2
     sm_scale: float,
 ) -> torch.Tensor:
-    q = q_input.transpose(-2, -3)        # B x BN x H x  M x K1
-    k = k_input.transpose(-2, -3)        # B x BN x H x K2 x K1
-    v = v_input.transpose(-2, -3)        # B x BN x H x K2 x  N
-    k_t = k.transpose(-1, -2)            # B x BN x H x K1 x K2
+    q = q_input.transpose(-2, -3)  # B x BN x H x  M x K1
+    k = k_input.transpose(-2, -3)  # B x BN x H x K2 x K1
+    v = v_input.transpose(-2, -3)  # B x BN x H x K2 x  N
+    k_t = k.transpose(-1, -2)  # B x BN x H x K1 x K2
     a = torch.matmul(q, k_t) * sm_scale  # B x BN x H x  M x K2
 
     for b in biases:
-        a += b                           # B x BN x H x  M x K2
+        a += b  # B x BN x H x  M x K2
 
-    a = F.softmax(a, dim=-1)             # B x BN x H x  M x K2
-    a_v = torch.matmul(a, v)             # B x BN x H x  M x  N
-    o = a_v.transpose(-2, -3)            # B x BN x M x  H x  N
+    a = F.softmax(a, dim=-1)  # B x BN x H x  M x K2
+    a_v = torch.matmul(a, v)  # B x BN x H x  M x  N
+    o = a_v.transpose(-2, -3)  # B x BN x M x  H x  N
 
     return o
 
@@ -153,7 +153,6 @@ def testEvoformerAttentionForward(
         #     lse,
         # )
 
-
         o = output.transpose(-2, -3)
         # pretend gradient from loss function
         do = device_randn(batch, n, heads, q_seq_len, v_dim, dtype=torch_dtype)
@@ -174,7 +173,6 @@ def testEvoformerAttentionForward(
         v_perm = v.transpose(-2, -3)
         # print(f"{shape=}")
         # print(f"{do.shape=}\n{o.shape=}\n{D.shape=}\n{q_perm.shape=}\n{k_perm.shape=}\n{v_perm.shape=}\n{lse.shape}\n{dq.shape=}\n{dk.shape=}\n{dv.shape=}")
-
 
         # (B, BN, K2, H, K1, M, N)
         # (1, 512, 128, 4, 16, 256, 8)

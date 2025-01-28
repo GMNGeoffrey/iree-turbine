@@ -51,6 +51,7 @@ import math
 
 logger = get_logger("turbine.wave.expansion")
 
+
 @dataclass(frozen=True)
 class ExpansionInfo:
     """
@@ -77,7 +78,7 @@ class ReductionInfo:
 
     def __repr__(self):
         get_results = {i: c.fx_node for i, c in self.get_results.items()}
-        return f"ReductionInfo({self.reduction.fx_node}, outputs={self.outputs}, init_args={self.init_args}, get_results={get_results}" 
+        return f"ReductionInfo({self.reduction.fx_node}, outputs={self.outputs}, init_args={self.init_args}, get_results={get_results}"
 
 
 class ExpansionContext:
@@ -238,7 +239,10 @@ def handle_reduction_entry(
         custom = get_custom(inputs[0])
         key = ExpansionInfo(custom, get_indexed_dims(dim_query, custom))
         reduction_info = reduction_context[reduction]
-        assert result_index not in reduction_info.outputs and result_index not in reduction_info.get_results, f"{result_index=} has already been computed for {reduction_info}"
+        assert (
+            result_index not in reduction_info.outputs
+            and result_index not in reduction_info.get_results
+        ), f"{result_index=} has already been computed for {reduction_info}"
         reduction_info.outputs[result_index] = key
         reduction_info.get_results[result_index] = new_node
 
@@ -416,7 +420,9 @@ def populate_inputs(
                 try:
                     reduction_count = dim_scaling[node.reduction_dim]
                 except KeyError as e:
-                    raise RuntimeError(f"Reduction dimension {node.reduction_dim} is not in {dim_scaling} for ReduceOp {node}")
+                    raise RuntimeError(
+                        f"Reduction dimension {node.reduction_dim} is not in {dim_scaling} for ReduceOp {node}"
+                    )
                 dim_queries = []
                 for i in range(reduction_count):
                     dim_query = deepcopy(metadata.dim_query)
@@ -482,7 +488,9 @@ def store_fixup_data(
                 if expanded_dims[node.reduction_dim] == 0:
                     return
             except KeyError as e:
-                raise RuntimeError(f"Reduction dim {node.reduction_dim} not in expanded dims {expanded_dims} for {node}")
+                raise RuntimeError(
+                    f"Reduction dim {node.reduction_dim} not in expanded dims {expanded_dims} for {node}"
+                )
 
             def get_dim_query(new_v: int):
                 dims = {
@@ -716,18 +724,15 @@ def expand_graph(
     expansion_context = ExpansionContext()
     for custom in leaf_ops:
         for dim_combination in get_dim_combinations(custom, constraints):
-            # print(f"Expanding leaf operation {custom.fx_node} along {dim_combination}")
             dfs(
                 custom,
                 dim_combination,
                 constraints,
                 expansion_context,
             )
-            # print(trace)
-    
+
     # Fixup all reduction nodes.
     fixup_reduction_nodes(trace, expansion_context)
-    # print(f"After fixup_reduction_nodes\n{trace}")
     # Fixup all mma nodes.
     fixup_mma_nodes(trace, expansion_context)
     # Remove original nodes in root graph.

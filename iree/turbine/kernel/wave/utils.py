@@ -308,13 +308,8 @@ def is_reshape_needed(
         if dim not in vector_shapes:
             # Ignore nodes that are not used in both mmas.
             return False
-        try:
             if node_vector_shapes[dim] != vector_shapes[dim]:
                 return True
-        except KeyError as e:
-            raise RuntimeError(
-                f"{node=}\n{node_vector_shapes=}\n{vector_shapes=}\n{dim=}"
-            ) from e
     return False
 
 

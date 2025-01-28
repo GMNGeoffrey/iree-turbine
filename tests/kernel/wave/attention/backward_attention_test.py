@@ -50,13 +50,18 @@ shapes_16x16x16 = [
     (1, 16, 16, 16, 16),
 ]
 
-shapes_32x32x32 = [tuple(dim if i == 0 else 2*dim for i, dim in enumerate(shape)) for shape in shapes_16x16x16]
+shapes_32x32x32 = [
+    tuple(dim if i == 0 else 2 * dim for i, dim in enumerate(shape))
+    for shape in shapes_16x16x16
+]
+
 
 def get_param_id(val):
     if isinstance(val, tuple) and all(isinstance(el, int) for el in val):
         return "x".join(str(el) for el in val)
     elif isinstance(val, MMAType):
         return f"MMA_{val.name}"
+
 
 param_mfma_shape = pytest.mark.parametrize(
     "mfma_variant,shape",
@@ -753,7 +758,7 @@ def get_attention_bwd_dv_kernel(
         # get errors about tile size being divisible by vector size.
         BLOCK_N: max(v_head_dim, vec_size),
         BLOCK_K1: max(qk_head_dim, vec_size),
-        BLOCK_K2: vec_size, # distributing this speeds things up a ton
+        BLOCK_K2: vec_size,  # distributing this speeds things up a ton
         B: batch,
         M_qs: q_seq_len,
         N_vd: v_head_dim,
@@ -897,7 +902,12 @@ def get_attention_bwd_dk_kernel(
             dp_ij_sub = tkw.permute(dp_ij_sub, [B, K2_kvs, M_qs])
 
             ds_ij = p_ij * dp_ij_sub
-            tkw.write(ds_ij, ds, mapping=flip_k2_m_write_mapping, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            tkw.write(
+                ds_ij,
+                ds,
+                mapping=flip_k2_m_write_mapping,
+                elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD,
+            )
 
             q_i_for_dk = tkw.read(
                 q,
@@ -934,7 +944,6 @@ def get_attention_bwd_dk_kernel(
     }
 
     return attention_bwd_dk, hyperparams
-
 
 
 def get_attention_bwd_dq_kernel(
@@ -1051,7 +1060,12 @@ def get_attention_bwd_dq_kernel(
             # permuting and then writing without a mapping breaks whichever of s
             # and dp is used later in the kernel iff we multiply p_ij and
             # dp_ij_sub to compute ds_ij.
-            tkw.write(s_ij, s, mapping=flip_k2_m_write_mapping, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            tkw.write(
+                s_ij,
+                s,
+                mapping=flip_k2_m_write_mapping,
+                elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD,
+            )
             s_ij = tkw.permute(s_ij, [B, M_qs, K2_kvs])
             lse_i = tkw.read(lse, elements_per_thread=1)
             s_ij_sub = tkw.cast(s_ij, tkl.f16) - lse_i
@@ -1068,7 +1082,12 @@ def get_attention_bwd_dq_kernel(
             # permuting and then writing without a mapping breaks whichever of s
             # and dp is used later in the kernel iff we multiply p_ij and
             # dp_ij_sub to compute ds_ij.
-            tkw.write(dp_ij, dp, mapping=flip_k2_m_write_mapping, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            tkw.write(
+                dp_ij,
+                dp,
+                mapping=flip_k2_m_write_mapping,
+                elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD,
+            )
             # dp_ij = tkw.permute(dp_ij, [B, M_qs, K2_kvs])
             # D_i = tkw.read(D, elements_per_thread=1)
             # dp_ij_sub = tkw.cast(dp_ij, tkl.f16) - D_i
@@ -1089,7 +1108,6 @@ def get_attention_bwd_dq_kernel(
             # tkw.write(dq_i, dq, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
 
             return dummy_prev
-
 
     hyperparams = {
         ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
@@ -1116,7 +1134,6 @@ def get_attention_bwd_dq_kernel(
     }
 
     return attention_bwd_dq, hyperparams
-
 
 
 @require_e2e
@@ -1169,9 +1186,16 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         torch.float32
     )
 
-    o_ref, dq_ref, dk_ref, dv_ref, s_ref, p_ref, ds_ref, dp_ref = (
-        attention_torch_ops_ref(q, k, v, do)
-    )
+    (
+        o_ref,
+        dq_ref,
+        dk_ref,
+        dv_ref,
+        s_ref,
+        p_ref,
+        ds_ref,
+        dp_ref,
+    ) = attention_torch_ops_ref(q, k, v, do)
 
     # We validated these elsewhere
     o_loops, lse, s_loops = attention_flash_fwd_loops(q, k, v)
@@ -1188,7 +1212,6 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
     dk_ref = dk_ref.to(torch.float16)
     dv_ref = dv_ref.to(torch.float16)
     ds_ref = ds_ref.to(torch.float16)
-
 
     attention_bwd_dv, hyperparams_dv = get_attention_bwd_dv_kernel(
         batch=batch,
@@ -1222,7 +1245,6 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         use_scheduling_barriers=enable_scheduling_barriers,
     ):
 
-
         dv = torch.zeros_like(v)
         s = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float32)
         p = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float16)
@@ -1238,7 +1260,6 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         assert_close(s, s_ref, **tols)
         assert_close(p, p_ref, **tols)
         assert_close(dv, dv_ref, **tols)
-
 
     attention_bwd_dk, hyperparams_dk = get_attention_bwd_dk_kernel(
         batch=batch,
@@ -1271,7 +1292,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         schedule=False,
         use_scheduling_barriers=enable_scheduling_barriers,
     ):
-        
+
         D = torch.sum(do * o_ref, -1).to(torch.float16)
         dk = torch.zeros_like(k)
         s = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float32)
@@ -1310,7 +1331,6 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         assert_close(ds, ds_ref, **tols)
         assert_close(dk, dk_ref, **tols)
 
-
     attention_bwd_dq, hyperparams_dq = get_attention_bwd_dq_kernel(
         batch=batch,
         kv_seq_len=kv_seq_len,
@@ -1342,7 +1362,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         schedule=False,
         use_scheduling_barriers=enable_scheduling_barriers,
     ):
-        
+
         D = torch.sum(do * o_ref, -1).to(torch.float16)
         dq = torch.zeros_like(q)
         dk = torch.zeros_like(k)
@@ -1376,7 +1396,9 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
                 f.write(mb_bwd_dq.module_op.get_asm())
             print(f"IR dumped to {filename}")
 
-        s_sub_ref = s_ref.to(torch.float16) - lse.reshape((batch, q_seq_len, 1)).expand(batch, q_seq_len, kv_seq_len)
+        s_sub_ref = s_ref.to(torch.float16) - lse.reshape((batch, q_seq_len, 1)).expand(
+            batch, q_seq_len, kv_seq_len
+        )
         dp_sub_ref = (dp_ref - D.reshape((batch, q_seq_len, 1))).to(torch.float16)
 
         # print(small_tensor_string(s, "s"))
@@ -1389,7 +1411,10 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         assert_close(ds, ds_ref, **tols)
         assert_close(dq, dq_ref, **tols)
 
-def small_tensor_string(t, name="", row_limit=50, col_limit=150, min_important_value=1e-5):
+
+def small_tensor_string(
+    t, name="", row_limit=50, col_limit=150, min_important_value=1e-5
+):
     # Unfortunately, pytest usually captures the output and so we can't access the real width here :-(
     # col_limit = col_limit or shutil.get_terminal_size().columns
     shape = "x".join([str(i) for i in t.shape])
@@ -1402,10 +1427,18 @@ def small_tensor_string(t, name="", row_limit=50, col_limit=150, min_important_v
     # Things large enough that we can't round them off to zero and small enough
     # that we need scientific notation to print them or if anything's big enough
     # that we need scientific notation.
-    sci_mode = torch.any(torch.logical_and(abs > min_important_value, abs < 1e-3)) or torch.max(abs) > 1e3
-    
+    sci_mode = (
+        torch.any(torch.logical_and(abs > min_important_value, abs < 1e-3))
+        or torch.max(abs) > 1e3
+    )
+
     def fallback():
-        with torch._tensor_str.printoptions(precision=2 if sci_mode else 3, linewidth=col_limit, sci_mode=sci_mode, threshold=0):
+        with torch._tensor_str.printoptions(
+            precision=2 if sci_mode else 3,
+            linewidth=col_limit,
+            sci_mode=sci_mode,
+            threshold=0,
+        ):
             return f"{name}[{shape}], {t.dtype}:\n{t}"
 
     if len(t.shape) > 2 or t.shape[0] > row_limit:
@@ -1432,7 +1465,7 @@ def small_tensor_string(t, name="", row_limit=50, col_limit=150, min_important_v
 def bool_tensor_string(t, print_limit=2048):
     if t.shape.numel() > print_limit:
         return ""
-    
+
     if len(t.shape) > 2:
         t = t.squeeze()
     if len(t.shape) < 2:
@@ -1502,9 +1535,16 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
     o_ref, dq_ref, dk_ref, dv_ref = attention_torch_builtin_ref(q, k, v, do)
 
     if extra_verification:
-        o_ops, dq_ops, dk_ops, dv_ops, s_ops, p_ops, ds_ops, dp_ops = (
-            attention_torch_ops_ref(q, k, v, do)
-        )
+        (
+            o_ops,
+            dq_ops,
+            dk_ops,
+            dv_ops,
+            s_ops,
+            p_ops,
+            ds_ops,
+            dp_ops,
+        ) = attention_torch_ops_ref(q, k, v, do)
 
         assert_close(o_ops, o_ref)
         assert_close(dq_ops, dq_ref)
@@ -2077,7 +2117,7 @@ def testReproExpansionOrthogonalToReduction(shape):
 @pytest.mark.parametrize(
     "mfma_variant",
     [MMAType.F32_16x16x16_F16, MMAType.F32_32x32x8_F16],
-    ids = get_param_id,
+    ids=get_param_id,
 )
 def testReproNonSquareMMAWithElementwise(mfma_variant):
     shape = (1, 32, 32, 32, 32)

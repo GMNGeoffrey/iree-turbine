@@ -139,9 +139,6 @@ class CapturedTrace:
     def get_root_graph(self) -> fx.Graph:
         return self.get_subgraph(self.root_graph)
 
-    def __str__(self) -> str:
-        return self.region_graph.pretty_string(self.root_graph)
-
     def walk(self, filter: Optional[Callable[[fx.Node], bool]] = None) -> list[fx.Node]:
         nodes: list[fx.Node] = []
         for region in self.region_graph.subgraphs.values():

@@ -153,9 +153,6 @@ class WaveEmitter:
     def _emit_graph(self, graph: fx.Graph):
         """Emits the given graph at the current insertion point."""
         for node in graph.nodes:
-            # print(f"Emitting {node}")
-            if str(node) in ["mma_K2:0_K1:0_M:0", "mma_K2:0_K1:0_M:0"]:
-                pass
             if node.op == "call_function" or node.op == "call_method":
                 self._emit_function_call_node(node)
             if node.op == "output":
@@ -176,9 +173,6 @@ class WaveEmitter:
 
     def lookup_node_values(self, node: fx.Node) -> List[Value]:
         assert NDEBUG or isinstance(node, fx.Node)
-        indexed_nodes = list(self._node_values.keys())
-        if str(node) == "dk_K2:0_K1:0_M:0":
-            pass
         values = self._node_values.get(node)
         if values is None:
             values = [self.root_sig.resolve_by_reference(("node", node))]
@@ -189,8 +183,6 @@ class WaveEmitter:
     def bind_node_proxy(self, node: fx.Node, proxy: IRProxyValue):
         """Binds a node's result to a Python/IR proxy object."""
         assert NDEBUG or (isinstance(node, fx.Node) and isinstance(proxy, IRProxyValue))
-        if str(node) == "dk_K2:0_K1:0_M:0":
-            pass
         self._node_values[node] = [proxy]
 
     def bind_node_proxies(self, node: fx.Node, proxies: List[IRProxyValue]):
@@ -198,8 +190,6 @@ class WaveEmitter:
             isinstance(node, fx.Node)
             and all(isinstance(p, IRProxyValue) for p in proxies)
         )
-        if str(node) == "dk_K2:0_K1:0_M:0":
-            pass
         self._node_values[node] = proxies
 
     def get_induction_vars_and_syms(self) -> tuple[list[OpResult], list[IndexExpr]]:
@@ -1415,9 +1405,11 @@ def handle_reduction(emitter: WaveEmitter, node: fx.Node):
         # Add mapping for iter args.
         subgraph: fx.Graph = emitter.trace.get_subgraph(subgraph)
         iter_args: list[fx.Node] = get_custom(node).iter_args(subgraph)
-        assert len(iter_args) == len(
-            forOp.inner_iter_args
-        ), f"Len of reduction and for op iter args must match, Reduction args: {iter_args}; For Op args: {[a.type for a in forOp.inner_iter_args]}"
+        assert len(iter_args) == len(forOp.inner_iter_args), (
+            f"Len of reduction and for op iter args must match,"
+            f" Reduction args: {iter_args};"
+            f" For Op args: {[a.type for a in forOp.inner_iter_args]}"
+        )
         for i, v in enumerate(forOp.inner_iter_args):
             emitter.bind_node_proxy(iter_args[i], IRProxyValue(v))
         captured_vars: list[fx.Node] = get_custom(node).captured_vars(subgraph)
@@ -1430,13 +1422,12 @@ def handle_reduction(emitter: WaveEmitter, node: fx.Node):
         flat_ret_values = [
             cast_py_value(emitter, value).ir_value for value in flat_ret_values
         ]
-        if len(flat_ret_values) != len(flat_init_args):
-            raise RuntimeError(
-                f"Loop must have the same number of return values as init args, but got\n"
-                f"{len(flat_ret_values)} vs {len(flat_init_args)}\n"
-                f"{flat_ret_values=}\n"
-                f"{flat_init_args=}\n"
-            )
+        assert len(flat_ret_values) == len(flat_init_args), (
+            f"Loop must have the same number of return values as init args, but got\n"
+            f"{len(flat_ret_values)} vs {len(flat_init_args)}\n"
+            f"{flat_ret_values=}\n"
+            f"{flat_init_args=}\n"
+        )
         scf_d.YieldOp(flat_ret_values)
 
     emitter.bind_node_proxies(node, [IRProxyValue(v) for v in forOp.results_])

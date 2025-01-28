@@ -49,15 +49,14 @@ def get_evoformer_kernel(
     LOAD_ELEMS_PER_THREAD = tkl.sym.LOAD_ELEMS_PER_THREAD
     STORE_ELEMS_PER_THREAD = tkl.sym.STORE_ELEMS_PER_THREAD
 
-
     # Expose user-constraints
     ratio_m = 2
     ratio_n = 1
     constraints: list[tkw.Constraint] = [tkw.WorkgroupConstraint(M, BLOCK_M, 0)]
     constraints += [tkw.WorkgroupConstraint(N, BLOCK_N, 1)]
-    constraints += [tkw.WorkgroupConstraint(B, BLOCK_B, 2)] # batch
-    constraints += [tkw.WorkgroupConstraint(BN, BLOCK_BN, 3)] # batch
-    constraints += [tkw.WorkgroupConstraint(H, BLOCK_H, 4)] # batch
+    constraints += [tkw.WorkgroupConstraint(B, BLOCK_B, 2)]
+    constraints += [tkw.WorkgroupConstraint(BN, BLOCK_BN, 3)]
+    constraints += [tkw.WorkgroupConstraint(H, BLOCK_H, 4)]
     constraints += [tkw.TilingConstraint(K2, BLOCK_K2)]
     constraints += [tkw.WaveConstraint(M, BLOCK_M / ratio_m)]
     constraints += [tkw.WaveConstraint(N, BLOCK_N / ratio_n)]
@@ -177,7 +176,6 @@ def get_evoformer_kernel(
         res_lse = res_max + tkw.log2(res_sum)
         res_lse_casted = tkw.cast(res_lse, datatype)
         tkw.write(res_lse_casted, lse, elements_per_thread=1)
-        
 
     # TODO(gcmn): figure out address spaces
     @tkw.wave(constraints)
@@ -202,11 +200,14 @@ def get_evoformer_kernel(
         init_dk = tkl.Register[B, BN, H, K2, K1, tkl.f32](0.0)
         init_dv = tkl.Register[B, BN, H, N, K2, tkl.f32](0.0)
 
-        @tkw.reduction(K2, init_args=[
-            init_dq,
-            init_dk,
-            init_dv,
-        ]) 
+        @tkw.reduction(
+            K2,
+            init_args=[
+                init_dq,
+                init_dk,
+                init_dv,
+            ],
+        )
         def repeat(
             partial_dq: tkl.Register[B, BN, H, M, K1, tkl.f32],
             partial_dk: tkl.Register[B, BN, H, K2, K1, tkl.f32],
@@ -217,76 +218,93 @@ def get_evoformer_kernel(
             tkl.Register[B, BN, H, N, K2, tkl.f32],
         ):
             # Load things
-            q_reg = tkw.read(q, mapping=q_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            q_reg = tkw.read(
+                q, mapping=q_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD
+            )
             # if datatype == tkl.bf16:
-                # q_reg = tkw.cast(tkw.cast(q_reg, tkl.f32), tkl.f16)
-            
+            # q_reg = tkw.cast(tkw.cast(q_reg, tkl.f32), tkl.f16)
+
             # o_reg = tkw.read(
             #     o, mapping=o_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD
             # )
             # if datatype == tkl.bf16:
-                # o_reg = tkw.cast(tkw.cast(o_reg, tkl.f32), tkl.f16)
+            # o_reg = tkw.cast(tkw.cast(o_reg, tkl.f32), tkl.f16)
 
-            do_reg = tkw.read(do, mapping=o_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            do_reg = tkw.read(
+                do, mapping=o_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD
+            )
             # if datatype == tkl.bf16:
-                # do_reg = tkw.cast(tkw.cast(do_reg, tkl.f32), tkl.f16)
-            
+            # do_reg = tkw.cast(tkw.cast(do_reg, tkl.f32), tkl.f16)
+
             lse_reg = tkw.read(lse, elements_per_thread=1)
             lse_reg = tkw.cast(lse_reg, tkl.f32)
             # if datatype == tkl.bf16:
-                # lse_reg = tkw.cast(tkw.cast(lse_reg, tkl.f32), tkl.f16)
+            # lse_reg = tkw.cast(tkw.cast(lse_reg, tkl.f32), tkl.f16)
 
             D_reg = tkw.read(D, elements_per_thread=1)
             D_reg = tkw.cast(D_reg, tkl.f32)
             # if datatype == tkl.bf16:
-                # D_reg = tkw.cast(tkw.cast(D_reg, tkl.f32), tkl.f16)
-            
-            k_reg = tkw.read(k, mapping=k_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
-            # if datatype == tkl.bf16:
-                # k_reg = tkw.cast(tkw.cast(k_reg, tkl.f32), tkl.f16)
+            # D_reg = tkw.cast(tkw.cast(D_reg, tkl.f32), tkl.f16)
 
-            v_reg = tkw.read(v, mapping=v_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD)
+            k_reg = tkw.read(
+                k, mapping=k_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD
+            )
             # if datatype == tkl.bf16:
-                # v_reg = tkw.cast(tkw.cast(v_reg, tkl.f32), tkl.f16)
+            # k_reg = tkw.cast(tkw.cast(k_reg, tkl.f32), tkl.f16)
+
+            v_reg = tkw.read(
+                v, mapping=v_mapping, elements_per_thread=LOAD_ELEMS_PER_THREAD
+            )
+            # if datatype == tkl.bf16:
+            # v_reg = tkw.cast(tkw.cast(v_reg, tkl.f32), tkl.f16)
             # end loads
 
-
             S_imm_reg = tkl.Register[B, BN, H, K2, M, tkl.f32](0.0)
-            q_perm = q_reg # tkw.permute(q_reg, target_shape=[B, BN, H, M, K1])
-            kT = tkw.permute(k_reg, target_shape=[B, BN, H, K1, K2]) # f16
-            do_perm = do_reg # tkw.permute(do_reg, target_shape=[B, BN, H, M, N]) f16
+            q_perm = q_reg  # tkw.permute(q_reg, target_shape=[B, BN, H, M, K1])
+            kT = tkw.permute(k_reg, target_shape=[B, BN, H, K1, K2])  # f16
+            do_perm = do_reg  # tkw.permute(do_reg, target_shape=[B, BN, H, M, N]) f16
 
-            S = tkw.mma(q_perm, kT, S_imm_reg) # [B, BN, H, M, K2] f32
-            P = tkw.exp2(S - lse_reg) # [B, BN, H, M, K2] f32
-            PT = tkw.permute(P, target_shape=[B, BN, H, K2, M]) # f32
+            S = tkw.mma(q_perm, kT, S_imm_reg)  # [B, BN, H, M, K2] f32
+            P = tkw.exp2(S - lse_reg)  # [B, BN, H, M, K2] f32
+            PT = tkw.permute(P, target_shape=[B, BN, H, K2, M])  # f32
             PT = tkw.cast(PT, tkl.f16)
-            partial_dv_perm = partial_dv # tkw.permute(partial_dv, target_shape=[B, BN, H, K2, N]) f32
-            new_partial_dv = tkw.mma(PT, do_perm, partial_dv_perm) # [B, BN, H, K2, N] f32
-            new_partial_dv = new_partial_dv # tkw.permute(new_partial_dv, target_shape=[B, BN, N, H, K2])
+            partial_dv_perm = partial_dv  # tkw.permute(partial_dv, target_shape=[B, BN, H, K2, N]) f32
+            new_partial_dv = tkw.mma(
+                PT, do_perm, partial_dv_perm
+            )  # [B, BN, H, K2, N] f32
+            new_partial_dv = new_partial_dv  # tkw.permute(new_partial_dv, target_shape=[B, BN, N, H, K2])
 
-            vT = tkw.permute(v_reg, target_shape=[B, BN, H, N, K2]) # f16
+            vT = tkw.permute(v_reg, target_shape=[B, BN, H, N, K2])  # f16
             dP_imm_reg = tkl.Register[B, BN, H, M, K2, tkl.f32](0.0)
-            dP = tkw.mma(do_perm, vT, dP_imm_reg) # [B, BN, H, M, K2] f32
+            dP = tkw.mma(do_perm, vT, dP_imm_reg)  # [B, BN, H, M, K2] f32
             # D_perm = tkw.permute(D_reg, target_shape=[B, BN, H, M]) # [B, BN, M, H]
-            dS = P * (dP - D_reg) # [B, BN, H, M, K2] # f32
-            dS = tkw.cast(dS, tkl.f16) # f16
+            dS = P * (dP - D_reg)  # [B, BN, H, M, K2] # f32
+            dS = tkw.cast(dS, tkl.f16)  # f16
 
-            partial_dq_perm = partial_dq # tkw.permute(partial_dq, target_shape=[B, BN, H, M, K1])
-            
-            k_perm = k_reg # tkw.permute(k_reg, target_shape=[B, BN, H, K2, K1]) f16
-            new_partial_dq = tkw.mma(dS, k_perm, partial_dq_perm) # [B, BN, H, M, K1] f32
-            new_partial_dq = new_partial_dq # tkw.permute(new_partial_dq, target_shape=[B, BN, M, H, K1])
+            partial_dq_perm = (
+                partial_dq  # tkw.permute(partial_dq, target_shape=[B, BN, H, M, K1])
+            )
 
-            dST = tkw.permute(dS, target_shape=[B, BN, H, K2, M]) # f16
-            new_partial_dk = partial_dk # tkw.permute(partial_dk, target_shape=[B, BN, H, K2, K1])
-            new_partial_dk = tkw.mma(dST, q_reg, new_partial_dk) # [B, BN, H, K2, K1] f32
-            new_partial_dk = new_partial_dk # tkw.permute(new_partial_dk, target_shape=[B, BN, K2, H, K1])
+            k_perm = k_reg  # tkw.permute(k_reg, target_shape=[B, BN, H, K2, K1]) f16
+            new_partial_dq = tkw.mma(
+                dS, k_perm, partial_dq_perm
+            )  # [B, BN, H, M, K1] f32
+            new_partial_dq = new_partial_dq  # tkw.permute(new_partial_dq, target_shape=[B, BN, M, H, K1])
+
+            dST = tkw.permute(dS, target_shape=[B, BN, H, K2, M])  # f16
+            new_partial_dk = (
+                partial_dk  # tkw.permute(partial_dk, target_shape=[B, BN, H, K2, K1])
+            )
+            new_partial_dk = tkw.mma(
+                dST, q_reg, new_partial_dk
+            )  # [B, BN, H, K2, K1] f32
+            new_partial_dk = new_partial_dk  # tkw.permute(new_partial_dk, target_shape=[B, BN, K2, H, K1])
 
             return (
                 new_partial_dq,
                 new_partial_dk,
                 new_partial_dv,
-            ) 
+            )
 
         (
             dq_res,
@@ -295,17 +313,25 @@ def get_evoformer_kernel(
         ) = repeat
         dq_res_casted = tkw.cast(dq_res, datatype)
         tkw.write(
-            dq_res_casted, dq, mapping=q_mapping, elements_per_thread=STORE_ELEMS_PER_THREAD
+            dq_res_casted,
+            dq,
+            mapping=q_mapping,
+            elements_per_thread=STORE_ELEMS_PER_THREAD,
         )
         dk_res_casted = tkw.cast(dk_res, datatype)
         tkw.write(
-            dk_res_casted, dk, mapping=k_mapping, elements_per_thread=STORE_ELEMS_PER_THREAD
+            dk_res_casted,
+            dk,
+            mapping=k_mapping,
+            elements_per_thread=STORE_ELEMS_PER_THREAD,
         )
         dv_res_casted = tkw.cast(dv_res, datatype)
         tkw.write(
-            dv_res_casted, dv, mapping=v_mapping, elements_per_thread=STORE_ELEMS_PER_THREAD
+            dv_res_casted,
+            dv,
+            mapping=v_mapping,
+            elements_per_thread=STORE_ELEMS_PER_THREAD,
         )
-
 
     SHAPE = 0
     TILE_SIZE = 1

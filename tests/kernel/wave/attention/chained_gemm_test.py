@@ -180,13 +180,17 @@ def testChainedGemm(
 @pytest.mark.parametrize(
     "mfma_variant",
     [
-        pytest.param((MMAType.F32_32x32x16_F8, MMAType.F32_32x32x16_K4_F8), id="MFMA_32x32x16+32x32x16_K4"),
-        pytest.param((MMAType.F32_16x16x32_F8, MMAType.F32_16x16x32_K4_F8), id="MFMA_16x16x32+16x16x32_K4"),
+        pytest.param(
+            (MMAType.F32_32x32x16_F8, MMAType.F32_32x32x16_K4_F8),
+            id="MFMA_32x32x16+32x32x16_K4",
+        ),
+        pytest.param(
+            (MMAType.F32_16x16x32_F8, MMAType.F32_16x16x32_K4_F8),
+            id="MFMA_16x16x32+16x16x32_K4",
+        ),
     ],
 )
-def testChainedGemmF8(
-    shape: tuple[int], mfma_variant: tuple[MMAType], request
-):
+def testChainedGemmF8(shape: tuple[int], mfma_variant: tuple[MMAType], request):
     run_bench = request.config.getoption("--runperf")
     dump_perf = request.config.getoption("--dump-perf-files-path")
     # Input sizes

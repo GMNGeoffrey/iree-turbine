@@ -362,8 +362,8 @@ class CustomOp(ABC):
         return self.custom_string({})
 
     def custom_string(self, value_map: dict[str, str]) -> str:
-        # print all variables of the node apart from graph
-        ignore_list = ["graph"]
+        # print all variables of the node apart from graph and fx_node
+        ignore_list = ["fx_node", "graph"]
         vars_list = [
             f"{key}={value}"
             for key, value in vars(self).items()
@@ -721,13 +721,6 @@ class BinaryPyOp(CustomOp, ABC):
         if has_same_type:
             self.type = lhs_type
             return
-        # else:
-        #     raise ValueError(
-        #         "BinaryPyOp requires lhs and rhs to have the same type."
-        #         f"\n{self}"
-        #         f"\n{lhs_type}"
-        #         f"\n{rhs_type}"
-        #     )
         lhs_dim_set = set(lhs_type.symbolic_shape)
         rhs_dim_set = set(rhs_type.symbolic_shape)
         if lhs_dim_set.isdisjoint(rhs_dim_set):
@@ -1551,21 +1544,16 @@ class GetResult(CustomOp):
     value: fx.Node
     res_idx: int
 
-    # def __post_init__(self):
-    #     super().__post_init__()
-    #     assert self.value is not None, f"GetResult node {self} instantiated without a value"
-    #     assert isinstance(get_custom(self.value), Reduction), f"GetResult node {self} instantiated with non-reduction value {self.value}\n{get_custom(self.value)}"
-
     def infer_type(self):
         op = get_custom(self.value)
         src_type = op.type
         if isinstance(src_type, list):
-            try:
-                self.type = src_type[self.res_idx]
-            except Exception as e:
-                raise ValueError(
-                    f"{op=}\n{self.res_idx=}\n{self.value=}\n{src_type=}"
-                ) from e
+            if self.res_idx >= len(src_type):
+                raise RuntimeError(
+                    f"GetResult of {self.res_idx} from result with {len(src_type)} results"
+                    f"\n{op=}\nsrc={self.value}\n{src_type=}"
+                )
+            self.type = src_type[self.res_idx]
         else:
             self.type = src_type
 
@@ -1740,8 +1728,9 @@ class ReduceOp(CustomOp, ABC):
             self.init is not None
             and get_custom(self.init).type.symbolic_shape != self.type.symbolic_shape
         ):
-            raise ValueError(
-                f"Init type for {self.tkw_op_name} {get_custom(self.init).type.symbolic_shape} must match reduce type {self.type.symbolic_shape}"
+            raise RuntimeError(
+                f"Init type for {self.tkw_op_name} {get_custom(self.init).type.symbolic_shape}"
+                f" must match reduce type {self.type.symbolic_shape}"
                 f"\n{self}"
             )
 

@@ -120,12 +120,12 @@ class IndexingContext:
     def __str__(self):
         return (
             f"IndexingContext("
-                f"subs: {self.subs}\n"
-                f"special_subs: {self.special_subs}\n"
-                f"shaped_bindings: {self.shaped_bindings}\n"
-                f"dyn_dims: {self.dyn_dims}\n"
-                f"frozen_subs: {self.frozen_subs}\n"
-                f"unbacked_symbols: {self.unbacked_symbols}\n"
+            f"subs: {self.subs}\n"
+            f"special_subs: {self.special_subs}\n"
+            f"shaped_bindings: {self.shaped_bindings}\n"
+            f"dyn_dims: {self.dyn_dims}\n"
+            f"frozen_subs: {self.frozen_subs}\n"
+            f"unbacked_symbols: {self.unbacked_symbols}\n"
             ")"
         )
 

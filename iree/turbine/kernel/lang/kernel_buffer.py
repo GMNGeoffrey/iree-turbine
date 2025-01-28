@@ -145,10 +145,7 @@ class KernelBuffer(metaclass=KernelBufferMeta):
         return cls.new_subtype(symbolic_shape=shape, dtype=dtype)
 
     def __repr__(self):
-        return f"Am I even being called? {type(self)}{self.usage}({self._tensor})"
-    
-    def __str__(self):
-        return repr(self)
+        return f"{type(self)}({self._tensor})"
 
     def __setitem__(self, key, item):
         ops.kernel_buffer_setitem(self, key, item)

@@ -9,6 +9,7 @@ from iree.turbine.kernel.wave.utils import (
     get_default_arch,
 )
 
+
 def pytest_addoption(parser):
     parser.addoption(
         "--run-e2e", action="store_true", default=False, help="run e2e tests"
@@ -84,4 +85,9 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(pytest.mark.skip("skip perf test"))
 
         if is_scheduling:
-            item.add_marker(pytest.mark.skipif("gfx94" not in get_default_arch(), reason="Scheduling tests only work on CDNA3"))
+            item.add_marker(
+                pytest.mark.skipif(
+                    "gfx94" not in get_default_arch(),
+                    reason="Scheduling tests only work on CDNA3",
+                )
+            )

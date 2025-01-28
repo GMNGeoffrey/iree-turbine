@@ -4,7 +4,6 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-import functools
 import re
 from typing import Any, Callable, Optional
 import torch.fx as fx
@@ -53,7 +52,6 @@ from .index_sequence_analysis import (
     partition_ops_with_gpr_offsets,
     partition_strided_operators,
     set_node_indices,
-    print_node_indices,
     set_post_expansion_indices,
 )
 from .shared_memory_indexing import (
@@ -484,7 +482,6 @@ class LaunchableWave(Launchable):
             llvm_func_config,
         )
 
-        # print("\n***Emitting IR***")
         emitter = WaveEmitter(
             dispatch_entrypoint, trace, self.constraints, dynamic_symbols
         )
@@ -496,8 +493,6 @@ class LaunchableWave(Launchable):
             print(asm)
             raise
         emitter.finish()
-        # pretty = '\n'.join(f"{k}: {v}" for k, v in emitter.root_sig._bindings_by_reference.items())
-        # print(pretty)
 
         if kwargs.get("canonicalize", False):
             canonicalize_module(mb.module_op)
