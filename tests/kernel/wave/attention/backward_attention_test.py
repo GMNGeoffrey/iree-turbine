@@ -51,8 +51,8 @@ shapes_16x16x16 = [
 ]
 
 shapes_32x32x32 = [
-    tuple(dim if i == 0 else 2 * dim for i, dim in enumerate(shape))
-    for shape in shapes_16x16x16
+    # tuple(dim if i == 0 else 2 * dim for i, dim in enumerate(shape))
+    # for shape in shapes_16x16x16
 ]
 
 

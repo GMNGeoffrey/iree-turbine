@@ -43,7 +43,6 @@ from .utils import (
     get_inputs,
     get_users,
     get_largest_index_and_size,
-    sort_indices,
 )
 import torch.fx as fx
 import numpy as np
