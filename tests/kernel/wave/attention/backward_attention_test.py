@@ -38,7 +38,6 @@ big_shapes = [
 
 shapes_16x16x16 = [
     (2, 64, 128, 32, 256),
-    # (40, 1024, 64, 64, 1024),
     # TODO(#374): These are additional demonstrations of this issue.
     # (1, 16, 16, 8, 16),
     # (1, 16, 16, 64, 16),
@@ -459,10 +458,10 @@ def get_attention_bwd_kernel(
         # Degenerate distribution seems to fix some bugs
         tkw.WorkgroupConstraint(K1_qkd, BLOCK_K1, 1),
         tkw.WorkgroupConstraint(N_vd, BLOCK_N, 2),
-        # Can only have 3 dimensions distributed in actual blocks or the
-        # compiler tries to index too far into waves_per_block (and if that is
-        # made longer there's just a fatal crash), so batch dimension needs to
-        # be last.
+        # TODO(#392): Can only have 3 dimensions distributed in actual blocks or
+        # the compiler tries to index too far into waves_per_block (and if that
+        # is made longer there's just a fatal crash), so batch dimension needs
+        # to be last.
         tkw.WorkgroupConstraint(B, BLOCK_B, 3),
         tkw.TilingConstraint(M_qs, BLOCK_M),
         tkw.HardwareConstraint(
@@ -515,6 +514,7 @@ def get_attention_bwd_kernel(
         dq: tkl.Memory[B, M_qs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         dk: tkl.Memory[B, K2_kvs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         dv: tkl.Memory[B, K2_kvs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        # We have extra output arguments so we can check intermediates.
         s: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
         p: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         ds: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
@@ -625,11 +625,12 @@ def get_attention_bwd_kernel(
         # get errors about tile size being divisible by vector size.
         BLOCK_N: max(v_head_dim, vec_size),
         BLOCK_K1: max(qk_head_dim, vec_size),
-        # TODO: Not actually what we want probably, but I couldn't get nested
-        # loops to work (the only option is a reduction, it insists on having
-        # args to reduce, and then it can't figure out the vector shapes for
-        # them if I give it dummy args) and I don't think our read/write scheme
-        # for dq is thread safe. So force the distribution of K2 to be degenerate.
+        # TODO(#364) and TODO(#365): Not actually what we want probably, but I
+        # couldn't get nested loops to work (the only option is a reduction, it
+        # insists on having args to reduce, and then it can't figure out the
+        # vector shapes for them if I give it dummy args) and I don't think our
+        # read/write scheme for dq is thread safe. So force the distribution of
+        # K2 to be degenerate.
         BLOCK_K2: max(kv_seq_len, vec_size),
         B: batch,
         M_qs: q_seq_len,
@@ -679,10 +680,10 @@ def get_attention_bwd_dv_kernel(
         # Degenerate distribution seems to fix some bugs
         tkw.WorkgroupConstraint(K1_qkd, BLOCK_K1, 1),
         tkw.WorkgroupConstraint(N_vd, BLOCK_N, 2),
-        # Can only have 3 dimensions distributed in actual blocks or the
-        # compiler tries to index too far into waves_per_block (and if that is
-        # made longer there's just a fatal crash), so batch dimension needs to
-        # be last.
+        # TODO(#392): Can only have 3 dimensions distributed in actual blocks or
+        # the compiler tries to index too far into waves_per_block (and if that
+        # is made longer there's just a fatal crash), so batch dimension needs
+        # to be last.
         tkw.WorkgroupConstraint(B, BLOCK_B, 3),
         tkw.TilingConstraint(M_qs, BLOCK_M),
         tkw.HardwareConstraint(
@@ -704,7 +705,7 @@ def get_attention_bwd_dv_kernel(
     )
 
     @tkw.wave(constraints)
-    def attention_bwd(
+    def attention_bwd_dv(
         q: tkl.Memory[B, M_qs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         k: tkl.Memory[B, K2_kvs, K1_qkd, GLOBAL_ADDRESS_SPACE, tkl.f16],
         do: tkl.Memory[B, M_qs, N_vd, GLOBAL_ADDRESS_SPACE, tkl.f16],
@@ -725,8 +726,9 @@ def get_attention_bwd_dv_kernel(
             log2e = tkl.Register[B, M_qs, K2_kvs, tkl.f16](1.44269504089)
             s_ij = tkw.mma(q_i, k_j, s_acc)
             tkw.write(s_ij, s, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
-            # a no-op permute here gets past a compiler error resolving node
-            # indices. I think it just hides the K1 dimension from the index.
+            # TODO(#410): a no-op permute here gets past a compiler error
+            # resolving node indices. I think it just hides the K1 dimension
+            # from the index.
             s_ij = tkw.permute(s_ij, [B, M_qs, K2_kvs])
             lse_i = tkw.read(lse, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
             p_ij = tkw.exp2(log2e * (tkw.cast(s_ij, tkl.f16) - lse_i))
@@ -766,7 +768,7 @@ def get_attention_bwd_dv_kernel(
         K2_kvs: kv_seq_len,
     }
 
-    return attention_bwd, hyperparams
+    return attention_bwd_dv, hyperparams
 
 
 def get_attention_bwd_dk_kernel(
@@ -807,10 +809,10 @@ def get_attention_bwd_dk_kernel(
         # Degenerate distribution seems to fix some bugs
         tkw.WorkgroupConstraint(K1_qkd, BLOCK_K1, 1),
         tkw.WorkgroupConstraint(N_vd, BLOCK_N, 2),
-        # Can only have 3 dimensions distributed in actual blocks or the
-        # compiler tries to index too far into waves_per_block (and if that is
-        # made longer there's just a fatal crash), so batch dimension needs to
-        # be last.
+        # TODO(#392): Can only have 3 dimensions distributed in actual blocks or
+        # the compiler tries to index too far into waves_per_block (and if that
+        # is made longer there's just a fatal crash), so batch dimension needs
+        # to be last.
         tkw.WorkgroupConstraint(B, BLOCK_B, 3),
         tkw.TilingConstraint(M_qs, BLOCK_M),
         tkw.HardwareConstraint(
@@ -984,10 +986,10 @@ def get_attention_bwd_dq_kernel(
         # Degenerate distribution seems to fix some bugs
         tkw.WorkgroupConstraint(K1_qkd, BLOCK_K1, 1),
         tkw.WorkgroupConstraint(N_vd, BLOCK_N, 2),
-        # Can only have 3 dimensions distributed in actual blocks or the
-        # compiler tries to index too far into waves_per_block (and if that is
-        # made longer there's just a fatal crash), so batch dimension needs to
-        # be last.
+        # TODO(#392): Can only have 3 dimensions distributed in actual blocks or
+        # the compiler tries to index too far into waves_per_block (and if that
+        # is made longer there's just a fatal crash), so batch dimension needs
+        # to be last.
         tkw.WorkgroupConstraint(B, BLOCK_B, 3),
         tkw.TilingConstraint(M_qs, BLOCK_M),
         tkw.HardwareConstraint(
@@ -1403,8 +1405,6 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int], request
         )
         dp_sub_ref = (dp_ref - D.reshape((batch, q_seq_len, 1))).to(torch.float16)
 
-        # print(small_tensor_string(s, "s"))
-        # print(small_tensor_string(lse, "lse"))
         assert_close(s, s_ref, **tols)
         assert_close(s_sub, s_sub_ref, **tols)
         assert_close(p, p_ref, **tols)
@@ -1484,7 +1484,7 @@ def bool_tensor_string(t, print_limit=2048):
 
 @require_e2e
 @param_mfma_shape
-def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
+def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int], request):
     batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
     small_shape = math.prod(shape) < 500_000
     extra_verification = small_shape
@@ -1751,7 +1751,6 @@ def testAttentionMine(mfma_variant: MMAType, shape: tuple[int], request):
             assert_close(ds_ref, p_ref * dp_sub_ref, **tols)
             assert_close(ds, ds_ref, **tols)
 
-        # the numerics here are ridiculously bad...
         assert_close(dk, dk_ref, **tols)
         assert_close(dq, dq_ref, **tols)
 
@@ -2152,10 +2151,10 @@ def testReproNonSquareMMAWithElementwise(mfma_variant):
         # Degenerate distribution seems to fix some bugs
         tkw.WorkgroupConstraint(K1_qkd, K1_qkd, 1),
         tkw.WorkgroupConstraint(N_vd, N_vd, 2),
-        # Can only have 3 dimensions distributed in actual blocks or the
-        # compiler tries to index too far into waves_per_block (and if that is
-        # made longer there's just a fatal crash), so batch dimension needs to
-        # be last.
+        # TODO(#392): Can only have 3 dimensions distributed in actual blocks or
+        # the compiler tries to index too far into waves_per_block (and if that
+        # is made longer there's just a fatal crash), so batch dimension needs
+        # to be last.
         tkw.WorkgroupConstraint(B, BLOCK_B, 3),
         tkw.TilingConstraint(M_qs, BLOCK_M),
         tkw.HardwareConstraint(
