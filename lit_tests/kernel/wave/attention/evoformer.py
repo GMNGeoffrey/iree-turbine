@@ -190,7 +190,7 @@ def test_evoformer():
         k = torch.randn(shape[0], shape[4], shape[3], dtype=torch.float16)
         v = torch.randn(shape[0], shape[4], shape[2], dtype=torch.float16)
         output = torch.zeros(shape[0], shape[1], shape[2], dtype=torch.float32)
-        print(evoformer(q, k, v, output).module_op)
+        print(evoformer(q, k, v, output))
 
         # CHECK:            func.func @evoformer
         # CHECK:                {{.*}} = scf.for
@@ -199,7 +199,7 @@ def test_evoformer():
         # CHECK:                    {{.*}} = vector.maskedload
         # CHECK:                    vector.store {{.*}}
         # CHECK:                    amdgpu.lds_barrier
-        # CHECK-COUNT-4:            {{.*}} = vector.gather
+        # CHECK-COUNT-16:           {{.*}} = vector.load
         # CHECK-COUNT-4:            {{.*}} = vector.load
         # CHECK-COUNT-8:           {{.*}} = amdgpu.mfma
         # CHECK-COUNT-2:            {{.*}} = vector.load

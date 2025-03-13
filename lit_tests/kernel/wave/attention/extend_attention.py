@@ -88,7 +88,7 @@ def test_extend_attention():
                 sequence_lengths_extend,
                 start_indices_extend,
                 output,
-            ).module_op
+            )
         )
         # This part ensure correctness of WG distribution for extend attention.
         # CHECK:              stream.executable.export public @extend_attention workgroups(%[[ARG0:.+]]: index, %[[ARG1:.+]]: index, %[[ARG2:.+]]: index, %[[ARG3:.+]]: index)
@@ -112,7 +112,7 @@ def test_extend_attention():
         # CHECK-NEXT:               vector.store %{{.*}}, %[[ALLOC2]]
         # CHECK-COUNT-1:            vector.maskedload
         # CHECK-COUNT-1:            vector.store %{{.*}}, %[[ALLOC1]]
-        # CHECK-COUNT-8:            vector.gather %[[ALLOC1]]
+        # CHECK-COUNT-32:           vector.load %{{.*}}
         # CHECK-COUNT-8:            vector.load %[[ALLOC2]]
         # CHECK-COUNT-8:            amdgpu.mfma
         # CHECK-COUNT-2:            arith.cmpi slt
@@ -128,7 +128,7 @@ def test_extend_attention():
         # CHECK:                scf.for
         # CHECK-COUNT-1:            vector.maskedload
         # CHECK-COUNT-1:            vector.store %{{.*}}, %[[ALLOC2]]
-        # CHECK-COUNT-8:            vector.gather %[[ALLOC1]]
+        # CHECK-COUNT-32:           vector.load %{{.*}}
         # CHECK-COUNT-8:            vector.load %[[ALLOC2]]
         # CHECK-COUNT-8:            amdgpu.mfma
         # CHECK-COUNT-2:            arith.cmpi slt
@@ -215,7 +215,7 @@ def test_causal_extend_attention():
                 sequence_lengths_extend,
                 start_indices_extend,
                 output,
-            ).module_op
+            )
         )
 
         # CHECK-LABEL:       func.func @extend_attention
@@ -231,7 +231,7 @@ def test_causal_extend_attention():
         # CHECK-NEXT:               vector.store %{{.*}}, %[[ALLOC2]]
         # CHECK-COUNT-1:            vector.maskedload
         # CHECK-COUNT-1:            vector.store %{{.*}}, %[[ALLOC1]]
-        # CHECK-COUNT-8:            vector.gather %[[ALLOC1]]
+        # CHECK-COUNT-32:           vector.load %{{.*}}
         # CHECK-COUNT-8:            vector.load %[[ALLOC2]]
         # CHECK-COUNT-8:            amdgpu.mfma
 
@@ -263,7 +263,7 @@ def test_causal_extend_attention():
         # CHECK:                scf.for
         # CHECK-COUNT-1:            vector.maskedload
         # CHECK-COUNT-1:            vector.store %{{.*}}, %[[ALLOC2]]
-        # CHECK-COUNT-8:            vector.gather %[[ALLOC1]]
+        # CHECK-COUNT-32:           vector.load %{{.*}}
         # CHECK-COUNT-8:            vector.load %[[ALLOC2]]
         # CHECK-COUNT-8:            amdgpu.mfma
 
@@ -361,7 +361,7 @@ def test_causal_extend_attention_32x32x8():
                 sequence_lengths_extend,
                 start_indices_extend,
                 output,
-            ).module_op
+            )
         )
 
         # CHECK-LABEL:       func.func @extend_attention
@@ -375,7 +375,7 @@ def test_causal_extend_attention_32x32x8():
         # CHECK-COUNT-2:            vector.maskedload
         # CHECK-COUNT-1:            vector.maskedload
         # CHECK-COUNT-1:            vector.store %{{.*}}, %[[ALLOC1]]
-        # CHECK-COUNT-8:            vector.gather %[[ALLOC1]]
+        # CHECK-COUNT-32:           vector.load %{{.*}}
         # CHECK-COUNT-8:            vector.load %[[ALLOC2]]
         # CHECK-COUNT-8:            amdgpu.mfma
 
@@ -399,7 +399,7 @@ def test_causal_extend_attention_32x32x8():
         # CHECK:                scf.for
         # CHECK-COUNT-1:            vector.maskedload
         # CHECK-COUNT-1:            vector.store %{{.*}}, %[[ALLOC2]]
-        # CHECK-COUNT-8:            vector.gather %[[ALLOC1]]
+        # CHECK-COUNT-32:           vector.load %{{.*}}
         # CHECK-COUNT-8:            vector.load %[[ALLOC2]]
         # CHECK-COUNT-8:            amdgpu.mfma
 

@@ -27,6 +27,7 @@ from ..common.utils import (
     require_e2e,
     enable_scheduling_barriers,
     dump_generated_mlir,
+    param_bool,
 )
 from ..common.shapes import get_test_shapes
 
@@ -36,25 +37,24 @@ default_tile_sizes = [(1, 1, 32, 1, None, 64, 32)]
 
 # From: https://github.com/microsoft/DeepSpeed/blob/master/tests/unit/ops/deepspeed4science/test_DS4Sci_EvoformerAttention.py
 def attention_reference(
-    q_input: torch.Tensor,  # B x BN x  M  x H x K1
-    k_input: torch.Tensor,  # B x BN x K2  x H x K1
-    v_input: torch.Tensor,  # B x BN x K2  x H x  N
-    biases: list[torch.Tensor],  # B x BN x  1  x 1 x K2
-    # B x  1 x  H  x M x K2
+    q_input: torch.Tensor,
+    k_input: torch.Tensor,
+    v_input: torch.Tensor,
+    biases: list[torch.Tensor],
     sm_scale: float,
 ) -> torch.Tensor:
-    q = q_input.transpose(-2, -3)  # B x BN x H x  M x K1
-    k = k_input.transpose(-2, -3)  # B x BN x H x K2 x K1
-    v = v_input.transpose(-2, -3)  # B x BN x H x K2 x  N
-    k_t = k.transpose(-1, -2)  # B x BN x H x K1 x K2
-    a = torch.matmul(q, k_t) * sm_scale  # B x BN x H x  M x K2
+    q = q_input.transpose(-2, -3)
+    k = k_input.transpose(-2, -3)
+    v = v_input.transpose(-2, -3)
+    k_t = k.transpose(-1, -2)
+    a = torch.matmul(q, k_t) * sm_scale
 
     for b in biases:
-        a += b  # B x BN x H x  M x K2
+        a += b
 
-    a = F.softmax(a, dim=-1)  # B x BN x H x  M x K2
-    a_v = torch.matmul(a, v)  # B x BN x H x  M x  N
-    o = a_v.transpose(-2, -3)  # B x BN x M x  H x  N
+    a = F.softmax(a, dim=-1)
+    a_v = torch.matmul(a, v)
+    o = a_v.transpose(-2, -3)
 
     return o
 
@@ -62,7 +62,7 @@ def attention_reference(
 @require_e2e
 @pytest.mark.parametrize("shape", get_test_shapes("evoformer"))
 @pytest.mark.parametrize("tile_sizes", default_tile_sizes)
-@pytest.mark.parametrize("enable_scheduling", [False])
+@param_bool("enable_scheduling", "sched", [False])
 @pytest.mark.parametrize(
     "mfma_variant",
     [
@@ -81,7 +81,7 @@ def testEvoformerAttentionForward(
     run_bench = request.config.getoption("--runperf")
     dump_perf = request.config.getoption("--dump-perf-files-path")
     shapes_and_tile_sizes = [(x, y) for x, y in zip(shape, tile_sizes)]
-    evoformer_fwd, evoformer_bwd, symbols = get_evoformer_kernel(
+    evoformer_fwd, symbols = get_evoformer_kernel(
         *shapes_and_tile_sizes, mfma_variant, dtype
     )
 
@@ -113,21 +113,6 @@ def testEvoformerAttentionForward(
             torch_dtype = torch.bfloat16
         else:
             torch_dtype = torch.float16
-
-        # # Order of shapes: (B, BN, K2, H, K1, M, N)
-        # default_test_shapes = [(1, 256, 256, 4, 32, 256, 32), (1, 512, 256, 8, 8, 256, 8)]
-        # B = batch
-        # BN = n
-        # K2 = kv_seq_len
-        # H = heads
-        # K1 = head_dim
-        # M = q_seq_len
-        # N = v_dim
-
-        # Simplification:
-        #  - kv_seq_len = q_seq_len (K2 = M)
-        #  - head_dim = v_dim (K1 = N)
-
         batch, n, kv_seq_len, heads, head_dim, q_seq_len, v_dim = shape
         q = device_randn(batch, n, q_seq_len, heads, head_dim, dtype=torch_dtype)
         k = device_randn(batch, n, kv_seq_len, heads, head_dim, dtype=torch_dtype)
@@ -136,80 +121,29 @@ def testEvoformerAttentionForward(
         mask_bias = 1e9 * (mask - 1)
         bias = device_randn(batch, heads, q_seq_len, kv_seq_len, dtype=torch_dtype)
         output = device_zeros(batch, n, q_seq_len, heads, v_dim, dtype=torch_dtype)
-        lse = device_zeros(batch, n, heads, q_seq_len, dtype=torch_dtype)
-        # The kernel uses log base 2 instead of base e, so we need to scale by
-        # this constant factor.
         log2e = 1.44269504089
-        dk_sqrt = math.sqrt(1.0 / head_dim)
+        dk_sqrt = math.sqrt(1.0 / shape[4])
         # TODO: Add scaling of QK as part of kernel.
         # TODO: Add v-permute as part of kernel.
-        # mb = evoformer_fwd(
-        #     q * dk_sqrt * log2e,
-        #     k,
-        #     v.permute([0, 1, 4, 3, 2]),
-        #     mask_bias,
-        #     bias * log2e,
-        #     output,
-        #     lse,
-        # )
+        asm = evoformer_fwd(
+            q * dk_sqrt * log2e,
+            k,
+            v.permute([0, 1, 4, 3, 2]),
+            mask_bias,
+            bias * log2e,
+            output,
+        )
 
-        o = output.transpose(-2, -3)
-        # pretend gradient from loss function
-        do = device_randn(batch, n, heads, q_seq_len, v_dim, dtype=torch_dtype)
+        mask_bias = mask_bias.view([batch, n, 1, 1, kv_seq_len])
+        bias = bias.view([batch, 1, heads, q_seq_len, kv_seq_len])
+        torch_ref = attention_reference(q, k, v, [mask_bias, bias], dk_sqrt)
 
-        # output tensors
-        dq = device_zeros(batch, n, heads, q_seq_len, head_dim, dtype=torch_dtype)
-        dk = device_zeros(batch, n, heads, kv_seq_len, head_dim, dtype=torch_dtype)
-        dv = device_zeros(batch, n, heads, kv_seq_len, v_dim, dtype=torch_dtype)
-        # dbias = device_zeros(batch, heads, q_seq_len, kv_seq_len, dtype=torch_dtype)
+        if dump_generated_mlir:
+            filename = f"wave_evoformer_{'x'.join(map(str, shape))}.mlir"
+            with open(filename, "w") as f:
+                f.write(asm)
 
-        # TODO: maybe compute this within the kernel? The description of the
-        # backward pass in the Flash Attention 2 paper has it computed
-        # external to both loops though.
-        D = torch.sum(do * o, -1)
-
-        q_perm = q.transpose(-2, -3)
-        k_perm = k.transpose(-2, -3)
-        v_perm = v.transpose(-2, -3)
-        # print(f"{shape=}")
-        # print(f"{do.shape=}\n{o.shape=}\n{D.shape=}\n{q_perm.shape=}\n{k_perm.shape=}\n{v_perm.shape=}\n{lse.shape}\n{dq.shape=}\n{dk.shape=}\n{dv.shape=}")
-
-        # (B, BN, K2, H, K1, M, N)
-        # (1, 512, 128, 4, 16, 256, 8)
-        # 1=B
-        # 512=BN
-        # 128=K2
-        # 4=H
-        # 16=K1
-        # 256=M
-        # 8=N
-
-        # mb_bwd = evoformer_bwd(
-        #     do,
-        #     D,
-        #     q_perm * dk_sqrt * log2e,
-        #     k_perm,
-        #     v_perm,
-        #     # mask_bias,
-        #     # bias,
-        #     # o,
-        #     lse,
-        #     dq,
-        #     dk,
-        #     dv,
-        #     # dbias,
-        # )
-
-        # mask_bias = mask_bias.view([batch, n, 1, 1, kv_seq_len])
-        # bias = bias.view([batch, 1, heads, q_seq_len, kv_seq_len])
-        # torch_ref = attention_reference(q, k, v, [mask_bias, bias], dk_sqrt)
-
-        # if dump_generated_mlir:
-        #     filename = f"wave_evoformer_{'x'.join(map(str, shape))}.mlir"
-        #     with open(filename, "w") as f:
-        #         f.write(mb.module_op.get_asm())
-
-        # eps = 1e-2 if output.dtype == torch.float16 else 5e-2
-        # assert (
-        #     torch.max(torch.abs(torch_ref - output)).item() < eps
-        # ), f"out eps: {torch.max(torch.abs(torch_ref - output))}"
+        eps = 1e-2 if output.dtype == torch.float16 else 5e-2
+        assert (
+            torch.max(torch.abs(torch_ref - output)).item() < eps
+        ), f"out eps: {torch.max(torch.abs(torch_ref - output))}"

@@ -48,11 +48,10 @@ from .constraints import (
 from .assumptions import Assumption
 import torch.fx as fx
 import iree.turbine.kernel.lang as tkl
-from pathlib import Path
 
 
-import tempfile
 from ...support.conversions import TORCH_DTYPE_TO_SIGNED_MLIR_TYPE_ASM
+from .profiling import benchmark_module
 from iree.compiler.dialects.transform import (
     interpreter as transform_interpreter,
     any_op_t,
@@ -65,15 +64,30 @@ import sympy
 import torch
 from iree.compiler import compile_str
 import iree.runtime as rt
-import iree.runtime.benchmark as bench
 
 # TODO: Monkey-patching f16 support, need to fix in iree.
 import numpy
-import ml_dtypes
-
 import ctypes
 
-bench.DTYPE_TO_ABI_TYPE[numpy.dtype(numpy.float16)] = "f16"
+
+def try_apply_pass(
+    p,
+    trace: CapturedTrace,
+    print_ir_before: Sequence[str] = [],
+    print_ir_after: Sequence[str] = [],
+):
+    if "all" in print_ir_before or p.__name__ in print_ir_before:
+        print(f"***Before {p.__name__}***\n")
+        print_trace(trace)
+    try:
+        p()
+    except Exception:
+        print(f"Error in pass: {p.__name__}\n")
+        print_trace(trace)
+        raise
+    if "all" in print_ir_after or p.__name__ in print_ir_after:
+        print(f"***After {p.__name__}***\n")
+        print_trace(trace)
 
 
 def canonicalize_module(module: Operation):
@@ -557,7 +571,7 @@ def _inplace_invoke(vm_context, device, entry_function, inputs, outputs, dynamic
     def push_tensor_to_arg_list(arg_tensor: torch.Tensor):
         if not arg_tensor.is_contiguous():
             arg_tensor = arg_tensor.contiguous()
-        capsule = arg_tensor.__dlpack__(None)
+        capsule = torch.to_dlpack(arg_tensor)
         arg_tensor_bv = device.from_dlpack_capsule(capsule)
 
         # IREE runtime renames capsule to "dltensor_used" for some reason, but
@@ -613,20 +627,19 @@ def _print_bench_result(result, filename):
         print(res)
 
 
-def get_device_uuid(input_tensors: list[torch.Tensor]) -> tuple[int, str]:
+@functools.lru_cache
+def get_device_uuid(device_list: list[str], device_str: str) -> tuple[int, str]:
     """
     Checks all torch.Tensor are on the same device, and get UUID from Torch device.
     """
-    device_list = [
-        input.device for input in input_tensors if isinstance(input, torch.Tensor)
-    ]
     if len(set(device_list)) != 1:
         raise ValueError(f"Found multiple device on input tensors:{set(device_list)}")
     device = device_list[0]
     if device.type != "cuda":
         raise ValueError("Expected all argument tensors to be in GPU.")
     uuid = str(torch.cuda.get_device_properties(device).uuid)
-    return uuid
+    device_str = f"{device_str}://GPU-{uuid}"
+    return device_str
 
 
 def compile_to_vmfb(
@@ -696,7 +709,6 @@ def invoke_vmfb(
     inplace: bool = False,
     kernel_hash: Optional[str] = None,
 ):
-
     device = config["device"]
     if run_bench:
         bench_batch_size = config.get("benchmark_batch_size", None)
@@ -717,8 +729,12 @@ def invoke_vmfb(
 
     if inplace:
         # Select device as the GPU, where input tensors are coming from.
-        device_uuid = get_device_uuid(kernel_inputs + kernel_outputs)
-        device = f"{device}://GPU-{device_uuid}"
+        device_list = tuple(
+            input.device
+            for input in kernel_inputs + kernel_outputs
+            if isinstance(input, torch.Tensor)
+        )
+        device = get_device_uuid(device_list, device)
     rt_config = rt.Config(device)
     device = rt_config.device
     vm_instance = rt_config.vm_instance
@@ -760,55 +776,18 @@ def invoke_vmfb(
             )
 
     if run_bench:
-        bench_with_constant_weights = config.get("bench_with_constant_weights", False)
-        tempfiles = []
-        inputs = []
-        all_inputs = kernel_inputs + kernel_outputs if inplace else kernel_inputs
-        all_inputs += kernel_dynamic_dims
-        if bench_with_constant_weights:
-            for inp in all_inputs:
-                if isinstance(inp, torch.Tensor):
-                    inputs.append(
-                        "x".join(
-                            [str(x) for x in inp.shape]
-                            + [TORCH_DTYPE_TO_SIGNED_MLIR_TYPE_ASM[inp.dtype]]
-                        )
-                    )
-                elif isinstance(inp, int):
-                    inputs.append(f"1xi32={inp}")
-                else:
-                    raise NotImplementedError("Unsupported input type.")
-        else:
-            for inp in all_inputs:
-                if isinstance(inp, torch.Tensor):
-                    inp = inp.cpu()
-                    if inp.dtype == torch.bfloat16:
-                        inp = (
-                            inp.view(dtype=torch.uint16)
-                            .numpy()
-                            .view(dtype=ml_dtypes.bfloat16)
-                        )
-                    else:
-                        inp = inp.numpy()
-                    with tempfile.NamedTemporaryFile(suffix=".npy", delete=False) as tf:
-                        numpy.save(tf, inp)
-                        tempfiles.append(tf)
-                        inputs.append("@" + tf.name)
-                elif isinstance(inp, int):
-                    inputs.append(f"1xi32={inp}")
-                else:
-                    raise NotImplementedError("Unsupported input type.")
-
-        benchmark_results = bench.benchmark_module(
+        benchmark_results = benchmark_module(
+            kernel_inputs,
+            kernel_outputs,
+            kernel_dynamic_dims,
+            config,
+            inplace,
             mod,
             entry_function=func_name,
             device=device,
-            inputs=inputs,
             **benchmark_flags,
         )
         _print_bench_result(benchmark_results, bench_file)
-        for file in tempfiles:
-            Path.unlink(file.name)
 
 
 def compile_and_invoke(
@@ -1287,7 +1266,7 @@ def _get_start_index(i: IndexSequence | IndexExpr) -> IndexExpr:
 
 
 def _get_start_indices(
-    src_indices: dict[IndexExpr, IndexSequence | IndexExpr]
+    src_indices: dict[IndexExpr, IndexSequence | IndexExpr],
 ) -> list[IndexExpr]:
     start_indices = []
     for dim_indexing in src_indices:

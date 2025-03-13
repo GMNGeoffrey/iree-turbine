@@ -49,7 +49,7 @@ def test_prefill_attention():
         output = torch.zeros(o_shape, dtype=torch.float32)
         offsets = torch.ones(shape.num_seqs, dtype=torch.int32)
         seq_lens = torch.ones(shape.num_seqs, dtype=torch.int32)
-        print(prefill_attention(q, k, v, offsets, seq_lens, output).module_op)
+        print(prefill_attention(q, k, v, offsets, seq_lens, output))
         # CHECK-LABEL:       func.func @prefill_attention
         # CHECK-COUNT-4:        vector.maskedload
         # CHECK:                scf.for
@@ -59,7 +59,7 @@ def test_prefill_attention():
         # CHECK-COUNT-1:            vector.store
         # CHECK-COUNT-1:            vector.maskedload
         # CHECK-COUNT-1:            vector.store
-        # CHECK-COUNT-16:           vector.gather
+        # CHECK-COUNT-64:           vector.load
         # CHECK-COUNT-16:           vector.load
         # CHECK-COUNT-16:           amdgpu.mfma
         # CHECK-COUNT-4:            gpu.shuffle xor {{.*}}

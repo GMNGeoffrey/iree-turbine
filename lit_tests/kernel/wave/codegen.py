@@ -70,7 +70,7 @@ def test_read():
 
     with codegen_test_context():
         a = torch.randn(16, 16, dtype=torch.float16)
-        print(read(a).module_op)
+        print(read(a))
 
         # CHECK-LABEL:    func.func @read
         # CHECK-SAME:       (%[[ARG0:[a-zA-Z0-9_]+]]: !stream.binding)
@@ -125,7 +125,7 @@ def test_read_mapped():
 
     with codegen_test_context():
         a = torch.randn(16, 16, dtype=torch.float16)
-        print(read_mapped(a).module_op)
+        print(read_mapped(a))
 
         # CHECK-LABEL:    func.func @read_mapped
         # CHECK-SAME:       (%[[ARG0:[a-zA-Z0-9_]+]]: !stream.binding)
@@ -156,10 +156,7 @@ def test_read_mapped():
         # CHECK:            %[[D8:.+]] = arith.addi %[[D7]], %[[D6]] overflow<nsw, nuw> : index
         # CHECK-DAG:        %[[CST:.+]] = arith.constant dense<[0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240]> : vector<16xindex>
         # CHECK-DAG:        %[[CST_2:.+]] = arith.constant 0.000000e+00 : f16
-        # CHECK:            %[[D9:.+]] = vector.splat %[[CST_2]] : vector<16xf16>
-        # CHECK:            %[[D10:.+]] = vector.gather %[[ARR]][%[[D5]], %[[D8]]] [%[[CST]]], %[[MASK]], %[[D9]] :
-        # CHECK-SAME:         memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<16xindex>, vector<16xi1>, vector<16xf16>
-        # CHECK-SAME:         into vector<16xf16>
+        # CHECK-COUNT-16:   vector.maskedload
 
 
 @run_test
@@ -198,7 +195,7 @@ def test_read_mapped_buffer():
         use_buffer_store_ops=True,
     ):
         a = torch.randn(16, 16, dtype=torch.float16)
-        print(read_mapped_buffer(a).module_op)
+        print(read_mapped_buffer(a))
 
         # CHECK-LABEL:    func.func @read_mapped_buffer
         # CHECK-COUNT-1:    memref.reinterpret_cast
@@ -228,7 +225,7 @@ def test_read_write():
     with codegen_test_context(canonicalize=True):
         a = torch.randn(16, 16, dtype=torch.float16)
         b = torch.zeros(16, 16, dtype=torch.float16)
-        print(read_write(a, b).module_op)
+        print(read_write(a, b))
 
         # CHECK-LABEL:    func.func @read_write
         # CHECK-SAME:       (%[[ARG0:[a-zA-Z0-9_]+]]: !stream.binding, %[[ARG1:[a-zA-Z0-9_]+]]: !stream.binding)
@@ -286,7 +283,7 @@ def test_read_write_diagonal():
 
     with codegen_test_context(canonicalize=True):
         c = torch.zeros(16, 16, dtype=torch.float16)
-        print(read_write_diagonal(c).module_op)
+        print(read_write_diagonal(c))
 
         # CHECK-LABEL:    func.func @read_write_diagonal
         # CHECK-SAME:       (%[[ARG0:[a-zA-Z0-9_]+]]: !stream.binding)
@@ -357,7 +354,7 @@ def test_read_write_masked():
     ):
         a = torch.randn(4, 4, dtype=torch.float16)
         b = torch.zeros(4, 4, dtype=torch.float16)
-        print(read_write_masked(a, b).module_op)
+        print(read_write_masked(a, b))
 
         # CHECK-LABEL:    func.func @read_write_masked
         # CHECK-SAME:       (%[[ARG0:[a-zA-Z0-9_]+]]: !stream.binding, %[[ARG1:[a-zA-Z0-9_]+]]: !stream.binding)
@@ -430,7 +427,7 @@ def test_read_write_masked_shared():
     ):
         a = torch.randn(4, 4, dtype=torch.float16)
         b = torch.zeros(4, 4, dtype=torch.float16)
-        print(read_write_masked_shared(a, b).module_op)
+        print(read_write_masked_shared(a, b))
 
         # CHECK-LABEL:    func.func @read_write_masked_shared
         # Check shared mem load stores are non masked
@@ -469,13 +466,10 @@ def test_read_write_mapping():
     with codegen_test_context(canonicalize=True):
         a = torch.randn(16, 16, dtype=torch.float16)
         b = torch.zeros(16, 16, dtype=torch.float16)
-        print(read_write_mapping(a, b).module_op)
+        print(read_write_mapping(a, b))
 
         # CHECK-LABEL:    func.func @read_write_mapping
         # CHECK-SAME:       (%[[ARG0:[a-zA-Z0-9_]+]]: !stream.binding, %[[ARG1:[a-zA-Z0-9_]+]]: !stream.binding)
-        # CHECK:            %[[CST:.+]] = arith.constant dense<[0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208,
-        # CHECK-SAME:         224, 240]> : vector<16xindex>
-        # CHECK-DAG:        %[[D11:.+]] = arith.constant dense<true> : vector<16xi1>
         # CHECK-DAG:        %[[C32:.+]] = arith.constant 32 : index
         # CHECK-DAG:        %[[C64:.+]] = arith.constant 64 : index
         # CHECK-DAG:        %[[C16:.+]] = arith.constant 16 : index
@@ -498,8 +492,7 @@ def test_read_write_mapping():
         # CHECK-SAME:         vector<16xf16>
         # CHECK:            %[[D10:.+]] = stream.binding.subspan %[[ARG1]][%[[C0]]] : !stream.binding -> memref<16x16xf16,
         # CHECK-SAME:         strided<[16, 1], offset: ?>>
-        # CHECK:            vector.scatter %[[D10]][%[[D8]], %[[D5]]] [%[[CST]]], %[[D11]], %[[D9]] : memref<16x16xf16,
-        # CHECK-SAME:         strided<[16, 1], offset: ?>>, vector<16xindex>, vector<16xi1>, vector<16xf16>
+        # CHECK-COUNT-16:   vector.store
 
 
 @run_test
@@ -543,17 +536,15 @@ def test_read_write_dynamic_mapping():
         a = torch.randn(16, 16, dtype=torch.float16)
         off = torch.randint(16, (16, 16), dtype=torch.int32)
         b = torch.zeros(16, 16, dtype=torch.float16)
-        print(read_write_dynamic_mapping(a, off, b).module_op)
+        print(read_write_dynamic_mapping(a, off, b))
 
         # CHECK-LABEL:    func.func @read_write_dynamic_mapping
         # CHECK-SAME:       (%[[ARG0:.*]]: !stream.binding, %[[ARG1:.*]]: !stream.binding, %[[ARG2:.*]]: !stream.binding)
-        # CHECK-DAG:        %[[CST:.*]] = arith.constant dense<0.000000e+00> : vector<16xf16>
         # CHECK-DAG:        %[[D0:.*]] = arith.constant 0 : index
         # CHECK-DAG:        %[[C16:.*]] = arith.constant 16 : index
         # CHECK-DAG:        %[[C32:.*]] = arith.constant 32 : index
         # CHECK-DAG:        %[[C64:.*]] = arith.constant 64 : index
         # CHECK-DAG:        %[[C256:.*]] = arith.constant 256 : index
-        # CHECK-DAG:        %[[D12:.*]] = arith.constant dense<true> : vector<16xi1>
         # CHECK:            %[[D0:.*]] = stream.binding.subspan %[[ARG1]][%[[C0]]] : !stream.binding -> memref<16x16xi32, strided<[16, 1], offset: ?>>
         # CHECK:            %[[D9:.*]] = vector.load %[[D0]][%[[D5:.*]], %[[D8:.*]]] : memref<16x16xi32, strided<[16, 1], offset: ?>>, vector<16xi32>
         # CHECK:            %[[D10:.*]] = stream.binding.subspan %[[ARG0]][%[[C0]]] : !stream.binding -> memref<16x16xf16, strided<[16, 1], offset: ?>>
@@ -565,9 +556,9 @@ def test_read_write_dynamic_mapping():
         # CHECK:            %[[D17:.*]] = arith.addi %[[D16]], %[[D13]] overflow<nsw, nuw> : index
         # CHECK:            %[[D18:.*]] = vector.splat %[[D17]] : vector<16xindex>
         # CHECK:            %[[D19:.*]] = arith.addi %[[D18]], %[[D11]] overflow<nsw, nuw> : vector<16xindex>
-        # CHECK:            %[[D20:.*]] = vector.gather %[[D10]][%[[C0]], %[[C0]]] [%[[D19]]], %[[D12]], %[[CST]] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<16xindex>, vector<16xi1>, vector<16xf16> into vector<16xf16>
+        # CHECK-COUNT-16:   vector.load
         # CHECK:            %[[D21:.*]] = stream.binding.subspan %[[ARG2]][%[[C0]]] : !stream.binding -> memref<16x16xf16, strided<[16, 1], offset: ?>>
-        # CHECK:            vector.store %[[D20]], %[[D21]][%[[D5]], %[[D8]]] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<16xf16>
+        # CHECK:            vector.store %{{.*}}, %[[D21]][%[[D5]], %[[D8]]] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<16xf16>
 
 
 @run_test
@@ -614,7 +605,7 @@ def test_read_write_dynamic_mapping_broadcast():
         a = torch.randn(16, 16, dtype=torch.float16)
         off = torch.randint(16, (16, 1), dtype=torch.int32)
         b = torch.zeros(16, 16, dtype=torch.float16)
-        print(read_write_dynamic_mapping_broadcast(a, off, b).module_op)
+        print(read_write_dynamic_mapping_broadcast(a, off, b))
 
         # CHECK-LABEL:    func.func @read_write_dynamic_mapping_broadcast
         # CHECK:            %[[OFF:.*]] = vector.load %{{.*}}[%[[M:.*]], %{{.*}}] : memref<16x1xi32, strided<[1, 1], offset: ?>>, vector<1xi32>
@@ -685,7 +676,7 @@ def test_read_write_dynamic_mapping_chain():
         off1 = torch.randint(2, (16, 2), dtype=torch.int32)
         off2 = torch.randint(16, (16, 4), dtype=torch.int32)
         b = torch.zeros(16, 16, dtype=torch.float16)
-        print(read_write_dynamic_mapping_chain(a, off1, off2, b).module_op)
+        print(read_write_dynamic_mapping_chain(a, off1, off2, b))
 
         # CHECK-LABEL:    func.func @read_write_dynamic_mapping_chain
         # CHECK:            %[[C8:.*]] = arith.constant 8 : index
@@ -750,7 +741,7 @@ def test_read_write_dynamic_symbol():
         a = torch.randn(16, 16, dtype=torch.float16)
         off = torch.randint(16, (16, 16), dtype=torch.int32)
         b = torch.zeros(16, 16, dtype=torch.float16)
-        print(test_dyn_symbol(a, off, b).module_op)
+        print(test_dyn_symbol(a, off, b))
 
         # CHECK-LABEL:    func.func @test_dyn_symbol
         #  CHECK-SAME:      (%[[ARG0:.*]]: !stream.binding, %[[ARG1:.*]]: !stream.binding, %[[ARG2:.*]]: !stream.binding, %[[ARG3:.*]]: index)
@@ -813,7 +804,7 @@ def test_read_write_dynamic_symbol_expr():
         a = torch.randn(16, 16, dtype=torch.float16)
         off = torch.randint(16, (16, 16), dtype=torch.int32)
         b = torch.zeros(16, 16, dtype=torch.float16)
-        print(test_dyn_expr(a, off, b).module_op)
+        print(test_dyn_expr(a, off, b))
 
         # CHECK-LABEL:    func.func @test_dyn_expr
         #  CHECK-SAME:      (%[[ARG0:.*]]: !stream.binding, %[[ARG1:.*]]: !stream.binding, %[[ARG2:.*]]: !stream.binding, %[[ARG3:.*]]: index)
@@ -866,7 +857,7 @@ def test_read_write_conditional():
         a = torch.randn(16, 16, dtype=torch.float16)
         mask = torch.randint(2, (16, 16), dtype=torch.int32)
         b = torch.zeros(16, 16, dtype=torch.float16)
-        print(test_conditional(a, mask, b).module_op)
+        print(test_conditional(a, mask, b))
 
         # CHECK-LABEL:    func.func @test_conditional
         #  CHECK-SAME:      (%[[ARG0:.*]]: !stream.binding, %[[ARG1:.*]]: !stream.binding, %[[ARG2:.*]]: !stream.binding)
@@ -904,7 +895,7 @@ def test_dynamic_copy():
 
     with codegen_test_context(canonicalize=True, dynamic_symbols=[M, N]):
         a = torch.randn(16, 16, dtype=torch.float16)
-        print(dynamic_copy(a).module_op)
+        print(dynamic_copy(a))
 
     # CHECK-LABEL:    func.func @dynamic_copy(%[[ARG0:.*]]: !stream.binding, %[[ARG1:.*]]: index, %[[ARG2:.*]]: index)
     # CHECK-SAME:       attributes {translation_info = #[[TRANSLATION:.+]]} {
@@ -962,7 +953,7 @@ def test_add_float():
 
     with codegen_test_context():
         a = torch.randn(16, 16, dtype=torch.float16)
-        print(add(a).module_op)
+        print(add(a))
         # CHECK-LABEL: func @add
         # CHECK: %[[SLICE:.+]] = vector.load
         # CHECK: arith.addf %[[SLICE]], %[[SLICE]] : vector<16xf16>
@@ -987,7 +978,7 @@ def test_add_integer():
 
     with codegen_test_context():
         a = torch.ones(16, 16, dtype=torch.int32)
-        print(test(a).module_op)
+        print(test(a))
         # CHECK-LABEL: func @test
         # CHECK: %[[SLICE:.+]] = vector.load
         # CHECK: arith.addi %[[SLICE]], %[[SLICE]] : vector<16xi32>
@@ -1024,7 +1015,7 @@ def test_unary_lowerings():
     a = torch.randn(16, 16, dtype=torch.float16)
     b = torch.ones(16, 16, dtype=torch.int32)
     with codegen_test_context():
-        print(test(a, b).module_op)
+        print(test(a, b))
         # CHECK-LABEL: func @test
         # Testing Negate
         # CHECK: %[[NEG:.+]] = arith.negf
@@ -1094,7 +1085,7 @@ def test_reduce_sum():
         },
         canonicalize=True,
     ):
-        print(test(a, b, c).module_op)
+        print(test(a, b, c))
         # CHECK-LABEL: func @test
         # CHECK-DAG: %[[C1:.+]] = arith.constant 1 : i32
         # CHECK-DAG: %[[C2:.+]] = arith.constant 2 : i32
@@ -1171,7 +1162,7 @@ def test_mutliple_local_reduce_sum():
         },
         canonicalize=True,
     ):
-        print(test(a, b, c).module_op)
+        print(test(a, b, c))
         # CHECK-LABEL: func @test
         # CHECK: %[[LHS:.+]] = vector.load {{.*}} : memref<256x128xf16
         # CHECK: %[[RHS:.+]] = vector.load {{.*}} : memref<256x128xf16
@@ -1243,7 +1234,7 @@ def test_reduction_and_elemwise():
         },
         canonicalize=True,
     ):
-        print(test(a, c).module_op)
+        print(test(a, c))
         # CHECK-LABEL: func @test
         # CHECK-DAG: %[[C0_IDX:.+]] = arith.constant 0 : index
         # CHECK-DAG: %[[C4_IDX:.+]] = arith.constant 4 : index
@@ -1333,7 +1324,7 @@ def test_tiled_reduce_max():
         },
         canonicalize=True,
     ):
-        print(test(a, b, c).module_op)
+        print(test(a, b, c))
         # CHECK-LABEL: func @test
         # CHECK-DAG: %[[C1:.+]] = arith.constant 1 : i32
         # CHECK-DAG: %[[C2:.+]] = arith.constant 2 : i32
@@ -1429,7 +1420,7 @@ def test_tiled_reduce_min():
         },
         canonicalize=True,
     ):
-        print(test(a, b, c).module_op)
+        print(test(a, b, c))
         # CHECK-LABEL: func @test
         # CHECK-DAG: %[[C1:.+]] = arith.constant 1 : i32
         # CHECK-DAG: %[[C2:.+]] = arith.constant 2 : i32
@@ -1529,7 +1520,7 @@ def test_multiple_reduction_iv():
         },
         canonicalize=True,
     ):
-        print(test(a, c).module_op)
+        print(test(a, c))
         # CHECK-LABEL: func @test
         # CHECK-DAG: %[[C0_IDX:.+]] = arith.constant 0 : index
         # CHECK-DAG: %[[C4_IDX:.+]] = arith.constant 4 : index
@@ -1630,7 +1621,7 @@ def test_reduce_propagate_broadcast():
         run=False,
         run_config=config,
     ):
-        print(test(a, c).module_op)
+        print(test(a, c))
         # CHECK-LABEL: func @test
         # CHECK-DAG: %[[C1:.+]] = arith.constant 1 : index
         # CHECK-DAG: %[[C8:.+]] = arith.constant 8 : index
@@ -1695,7 +1686,7 @@ def test_explicit_broadcast():
         run=False,
         run_config=config,
     ):
-        print(explicit_broadcast(a, b, c).module_op)
+        print(explicit_broadcast(a, b, c))
         # CHECK-LABEL: func.func @explicit_broadcast
         # CHECK-SAME: (%[[ARG0:.+]]: !stream.binding, %[[ARG1:.+]]: !stream.binding, %{{.+}}: !stream.binding)
         # CHECK-DAG: %[[C0:.+]] = arith.constant 0 : index
@@ -1770,7 +1761,7 @@ def test_broadcast_add():
         run=False,
         run_config=config,
     ):
-        print(broadcast_add(a, b, c).module_op)
+        print(broadcast_add(a, b, c))
         # CHECK-LABEL: func.func @broadcast_add
         # CHECK-SAME: (%[[ARG0:.+]]: !stream.binding, %[[ARG1:.+]]: !stream.binding, %{{.+}}: !stream.binding)
         # CHECK-DAG: %[[C0:.+]] = arith.constant 0 : index
@@ -1828,7 +1819,7 @@ def test_binary_lowerings():
     a = torch.randn(16, 16, dtype=torch.float16)
     b = torch.randn(16, 16, dtype=torch.float16)
     with codegen_test_context():
-        print(binary_lowerings(a, b).module_op)
+        print(binary_lowerings(a, b))
         # CHECK-LABEL: func @binary_lowerings
         # CHECK: %[[SUB:.+]] = arith.subf
         # CHECK: %[[MUL:.+]] = arith.mulf %[[SUB]]
@@ -1869,7 +1860,7 @@ def test_int_comparisons():
     a = torch.randint(42, (16, 16), dtype=torch.int32)
     b = torch.randint(42, (16, 16), dtype=torch.int32)
     with codegen_test_context():
-        print(cmp_lowerings(a, b).module_op)
+        print(cmp_lowerings(a, b))
         # CHECK-LABEL: @cmp_lowerings
         # CHECK: arith.cmpi sgt
         # CHECK: arith.select
@@ -1912,7 +1903,7 @@ def test_verbose_int_comparisons():
     a = torch.randint(42, (16, 16), dtype=torch.int32)
     b = torch.randint(42, (16, 16), dtype=torch.int32)
     with codegen_test_context():
-        print(verbose_cmp_lowerings(a, b).module_op)
+        print(verbose_cmp_lowerings(a, b))
         # CHECK-LABEL: @verbose_cmp_lowerings
         # CHECK: arith.cmpi sgt
         # CHECK: arith.select
