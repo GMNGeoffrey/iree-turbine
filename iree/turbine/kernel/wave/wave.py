@@ -597,19 +597,28 @@ class LaunchableWave(Launchable):
                     if arg_access:
                         asm = re.sub(rf"{arg_access[0]}\b", f"%{b.name}", asm)
             log2e_matches = re.findall(
-                r"(%\w+) = arith.constant dense<1\.44269502(?:e\+00)?> : vector<(\d+)x(f\d+)>",
+                r"(%\w+) = arith\.constant dense<1\.44269502(?:e\+00)?> : vector<(\d+)x(f\d+)>",
                 asm,
             )
             for m in log2e_matches:
                 ssa, v_size, dtype = m
                 asm = re.sub(rf"{ssa}\b", f"%log2e_{v_size}v{dtype}", asm)
+
             zero_matches = re.findall(
-                r"(%\w+) = arith.constant dense<0\.0*(?:e\+00)?> : vector<(\d+)x(f\d+)>",
+                r"(%\w+) = arith\.constant dense<0\.0*(?:e\+00)?> : vector<(\d+)x(f\d+)>",
                 asm,
             )
             for m in zero_matches:
                 ssa, v_size, dtype = m
                 asm = re.sub(rf"{ssa}\b", f"%c0_{v_size}v{dtype}", asm)
+
+            neg_inf_matches = re.findall(
+                r"(%\w+) = arith\.constant dense<-1\.0*e\+06> : vector<(\d+)x(f\d+)>",
+                asm,
+            )
+            for m in neg_inf_matches:
+                ssa, v_size, dtype = m
+                asm = re.sub(rf"{ssa}\b", f"%c_minf_{v_size}v{dtype}", asm)
             print("Prettified MLIR:\n", asm)
 
         return mb, trace, exe, kernel_sig, entrypoint_name
