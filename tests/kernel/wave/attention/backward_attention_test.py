@@ -1104,80 +1104,91 @@ def get_attention_bwd_dq_kernel(
         dp_sub: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
     ):
 
-        # TODO(#364): Workaround for missing non-reduction loop. This needs to
-        # have only dimensions that are in the vector shapes or it doesn't have
-        # vector shapes for its indexing dims.
-        dummy_init = tkl.Register[B, tkl.f16](0.0)
+        dummy_init_outer = tkl.Register[B, tkl.f16](0.0)
 
-        @tkw.reduction(M_qs, init_args=[dummy_init])
-        def loop_q_seq_len(dummy_prev: tkl.Register[B, tkl.f16]):
-            k_j = tkw.read(k, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
-            q_i = tkw.read(q, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
+        @tkw.reduction(K2_kvs, init_args=[dummy_init_outer])
+        def loop_kv_seq_len(dummy_prev_outer: tkl.Register[B, tkl.f16]):
 
-            s_acc = tkl.Register[B, K2_kvs, M_qs, tkl.f32](0.0)
-            scale_s_reg = tkl.Register[B, K2_kvs, M_qs, tkl.f32](scale)
-            s_unscaled_ij = tkw.mma(k_j, q_i, s_acc)
-            s_unscaled_ij = tkw.permute(s_unscaled_ij, [B, K2_kvs, M_qs])
-            s_ij = scale_s_reg * s_unscaled_ij
-            # permuting and then writing without a mapping breaks whichever of s
-            # and dp is used later in the kernel iff we multiply p_ij and
-            # dp_ij_sub to compute ds_ij. So even though we are about to permute
-            # this, we do the write with a mapping instead.
-            tkw.write(
-                s_ij,
-                s,
-                mapping=flip_k2_m_write_mapping,
-                elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD,
-            )
-            s_ij = tkw.permute(s_ij, [B, M_qs, K2_kvs])
-            lse_i = tkw.read(lse, elements_per_thread=1)
-            s_ij_sub = tkw.cast(s_ij, tkl.f16) - lse_i
-            tkw.write(s_ij_sub, s_sub, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
-            log2e = tkl.Register[B, K2_kvs, M_qs, tkl.f16](1.44269504089)
-            log2e = tkw.permute(log2e, [B, M_qs, K2_kvs])
-            p_ij = tkw.exp2(log2e * s_ij_sub)
-            tkw.write(p_ij, p, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            # TODO(#364): Workaround for missing non-reduction loop. This needs to
+            # have only dimensions that are in the vector shapes or it doesn't have
+            # vector shapes for its indexing dims.
+            dummy_init_inner = tkl.Register[B, tkl.f16](0.0)
 
-            v_j = tkw.read(v, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
-            do_i = tkw.read(do, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
-            dp_acc = tkl.Register[B, K2_kvs, M_qs, tkl.f32](0.0)
-            dp_ij = tkw.mma(v_j, do_i, dp_acc)
-            # permuting and then writing without a mapping breaks whichever of s
-            # and dp is used later in the kernel iff we multiply p_ij and
-            # dp_ij_sub to compute ds_ij.
-            tkw.write(
-                dp_ij,
-                dp,
-                mapping=flip_k2_m_write_mapping,
-                elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD,
-            )
-            dp_ij = tkw.permute(dp_ij, [B, M_qs, K2_kvs])
-            D_i = tkw.read(D, elements_per_thread=1)
-            dp_ij_sub = tkw.cast(dp_ij, tkl.f16) - D_i
-            tkw.write(dp_ij_sub, dp_sub, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            @tkw.reduction(M_qs, init_args=[dummy_init_inner])
+            def loop_q_seq_len(dummy_prev_inner: tkl.Register[B, tkl.f16]):
+                k_j = tkw.read(k, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
+                q_i = tkw.read(q, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
 
-            ds_ij = p_ij * dp_ij_sub
-            tkw.write(ds_ij, ds, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
-            scale_ds_reg = tkl.Register[B, M_qs, K2_kvs, tkl.f16](scale)
-            ds_scaled_ij = scale_ds_reg * ds_ij
+                s_acc = tkl.Register[B, K2_kvs, M_qs, tkl.f32](0.0)
+                scale_s_reg = tkl.Register[B, K2_kvs, M_qs, tkl.f32](scale)
+                s_unscaled_ij = tkw.mma(k_j, q_i, s_acc)
+                s_unscaled_ij = tkw.permute(s_unscaled_ij, [B, K2_kvs, M_qs])
+                s_ij = scale_s_reg * s_unscaled_ij
+                # permuting and then writing without a mapping breaks whichever of s
+                # and dp is used later in the kernel iff we multiply p_ij and
+                # dp_ij_sub to compute ds_ij. So even though we are about to permute
+                # this, we do the write with a mapping instead.
+                tkw.write(
+                    s_ij,
+                    s,
+                    mapping=flip_k2_m_write_mapping,
+                    elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD,
+                )
+                s_ij = tkw.permute(s_ij, [B, M_qs, K2_kvs])
+                lse_i = tkw.read(lse, elements_per_thread=1)
+                s_ij_sub = tkw.cast(s_ij, tkl.f16) - lse_i
+                tkw.write(
+                    s_ij_sub, s_sub, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD
+                )
+                log2e = tkl.Register[B, K2_kvs, M_qs, tkl.f16](1.44269504089)
+                log2e = tkw.permute(log2e, [B, M_qs, K2_kvs])
+                p_ij = tkw.exp2(log2e * s_ij_sub)
+                tkw.write(p_ij, p, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
 
-            # We have to read q a second time so that we get k as
-            # [B, K1_qkd, K2_kvs] for the matmul to compute dq whereas we need k
-            # as [B, K2_kvs, K1_qkd] for the matmul to compute s. That logical
-            # dimension order should be resolvable with a permute, but at the
-            # thread level the individual threads need different elements of q.
-            # Ideally the compiler should just be smart enough to insert a
-            # shuffle operation here.
-            k_j_for_dq = tkw.read(
-                k,
-                mapping=flip_k2_k1_read_mapping,
-                elements_per_thread=MFMA_INPUT_ELS_PER_THREAD,
-            )
-            dq_prev = tkw.read(dq, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
-            dq_i = tkw.mma(ds_scaled_ij, k_j_for_dq, tkw.cast(dq_prev, tkl.f32))
-            tkw.write(dq_i, dq, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+                v_j = tkw.read(v, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
+                do_i = tkw.read(do, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
+                dp_acc = tkl.Register[B, K2_kvs, M_qs, tkl.f32](0.0)
+                dp_ij = tkw.mma(v_j, do_i, dp_acc)
+                # permuting and then writing without a mapping breaks whichever of s
+                # and dp is used later in the kernel iff we multiply p_ij and
+                # dp_ij_sub to compute ds_ij.
+                tkw.write(
+                    dp_ij,
+                    dp,
+                    mapping=flip_k2_m_write_mapping,
+                    elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD,
+                )
+                dp_ij = tkw.permute(dp_ij, [B, M_qs, K2_kvs])
+                D_i = tkw.read(D, elements_per_thread=1)
+                dp_ij_sub = tkw.cast(dp_ij, tkl.f16) - D_i
+                tkw.write(
+                    dp_ij_sub, dp_sub, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD
+                )
 
-            return dummy_prev
+                ds_ij = p_ij * dp_ij_sub
+                tkw.write(ds_ij, ds, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+                scale_ds_reg = tkl.Register[B, M_qs, K2_kvs, tkl.f16](scale)
+                ds_scaled_ij = scale_ds_reg * ds_ij
+
+                # We have to read q a second time so that we get k as
+                # [B, K1_qkd, K2_kvs] for the matmul to compute dq whereas we need k
+                # as [B, K2_kvs, K1_qkd] for the matmul to compute s. That logical
+                # dimension order should be resolvable with a permute, but at the
+                # thread level the individual threads need different elements of q.
+                # Ideally the compiler should just be smart enough to insert a
+                # shuffle operation here.
+                k_j_for_dq = tkw.read(
+                    k,
+                    mapping=flip_k2_k1_read_mapping,
+                    elements_per_thread=MFMA_INPUT_ELS_PER_THREAD,
+                )
+                dq_prev = tkw.read(dq, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+                dq_i = tkw.mma(ds_scaled_ij, k_j_for_dq, tkw.cast(dq_prev, tkl.f32))
+                tkw.write(dq_i, dq, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+
+                return dummy_prev_inner
+
+            return dummy_prev_outer
 
     hyperparams = {
         ADDRESS_SPACE: SHARED_ADDRESS_SPACE,
@@ -1190,11 +1201,6 @@ def get_attention_bwd_dq_kernel(
         # get errors about tile size being divisible by vector size.
         BLOCK_N: max(v_head_dim, vec_size),
         BLOCK_K1: max(qk_head_dim, vec_size),
-        # TODO(#364) and TODO(#365) and TODO(#586): We actually want a nested
-        # (#586) loop (#364) or an atomic add (#365), but those aren't
-        # supported. So we force the distribution of K2 to be degenerate and
-        # expansion will have to fully unroll it.
-        BLOCK_K2: max(kv_seq_len, vec_size),
         B: batch,
         M_qs: q_seq_len,
         N_vd: v_head_dim,

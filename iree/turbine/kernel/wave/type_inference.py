@@ -12,16 +12,14 @@ from ...support.logging import get_logger
 logger = get_logger("turbine.wave.type_inference")
 
 
-def infer_types(trace: CapturedTrace | fx.Graph):
-    if isinstance(trace, fx.Graph):
-        all_nodes = trace.nodes
-    else:
-        all_nodes = trace.get_root_graph().nodes
+def infer_types(trace: CapturedTrace, graph_name: str | None = None):
+    graph_name = graph_name or trace.root_graph
+
     # Infer and set the types for all nodes in the graph.
-    for node in all_nodes:
+    for node in trace.get_subgraph(graph_name).nodes:
         custom = get_custom(node)
         if isinstance(custom, NestedRegionOp):
-            infer_types(trace.region_graph.subgraphs[custom.subgraph_name])
+            infer_types(trace, custom.subgraph_name)
         custom.infer_type()
         # For implicit captures, get type from variables in root graph.
         if "lifted" in custom.fx_node.meta:
