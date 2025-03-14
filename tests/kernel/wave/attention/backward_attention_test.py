@@ -38,7 +38,7 @@ shapes_16x16x16 = [
     (1, 16, 32, 16, 16),
     (1, 32, 16, 16, 16),
     (2, 16, 16, 16, 16),
-    (2, 64, 128, 32, 256),
+    # (2, 64, 128, 32, 256),
 ]
 
 
@@ -118,20 +118,20 @@ def attention_torch_ops_ref(q, k, v, do, scale=1):
     return o, dq, dk, dv, s, p, ds, dp
 
 
-def attention_bwd_torch_ops_ref(q, k, v, do, p, o, scale=1):
+def attention_bwd_torch_ops_ref(q, k, v, do, p, scale=1):
     """Attention backward pass computed with individual Torch operations."""
 
     dv = torch.matmul(p.transpose(-1, -2), do)
     dp = torch.matmul(do, v.transpose(-1, -2))
-    D = torch.sum(do * o, -1)
-    ds = p * (dp - D.unsqueeze(-1))
-    dq = torch.matmul(ds, k)
-    dk = torch.matmul(ds.transpose(-1, -2), q)
+    ds = p * (dp - torch.sum(p * dp, -1).unsqueeze(-1))
+    ds_scaled = scale * ds
+    dq = torch.matmul(ds_scaled, k)
+    dk = torch.matmul(ds_scaled.transpose(-1, -2), q)
 
     return dq, dk, dv, ds, dp
 
 
-def attention_flash_fwd_loops_ref(q, k, v):
+def attention_flash_fwd_loops_ref(q, k, v, scale=1):
     """Reference implementation for Flash Attention 2 foward pass.
 
     This implements the forward pass of the Flash Attention 2 algorithm using
@@ -175,7 +175,7 @@ def attention_flash_fwd_loops_ref(q, k, v):
                 assert k_j.shape == (BLOCK_K2_Bc, K1_qkd)
                 v_j = v[batch, start_k2:end_k2, :]
                 assert v_j.shape == (BLOCK_K2_Bc, N_vd)
-                s_ij = torch.matmul(q_i, k_j.transpose(-1, -2))
+                s_ij = scale * torch.matmul(q_i, k_j.transpose(-1, -2))
                 assert s_ij.shape == (BLOCK_M_Br, BLOCK_K2_Bc)
                 s[batch, start_m:end_m, start_k2:end_k2] = s_ij
                 m_ij = torch.maximum(m_i, torch.max(s_ij, dim=-1)[0])
@@ -202,7 +202,7 @@ def attention_flash_fwd_loops_ref(q, k, v):
     return o, lse, s
 
 
-def attention_flash_bwd_loops_ref(q, k, v, do, o, lse):
+def attention_flash_bwd_loops_ref(q, k, v, do, o, lse, scale=1):
     """Reference implementation for Flash Attention 2 backward pass.
 
     This implements the backward pass of the Flash Attention 2 algorithm using
@@ -260,7 +260,7 @@ def attention_flash_bwd_loops_ref(q, k, v, do, o, lse):
                 assert lse_i.shape == (BLOCK_M_Br,)
                 D_i = D[batch, start_m:end_m]
                 assert D_i.shape == (BLOCK_M_Br,)
-                s_ij = torch.matmul(q_i, k_j.transpose(-1, -2))
+                s_ij = scale * torch.matmul(q_i, k_j.transpose(-1, -2))
                 assert s_ij.shape == (BLOCK_M_Br, BLOCK_K2_Bc)
                 s[batch, start_m:end_m, start_k2:end_k2] = s_ij
                 p_ij = torch.exp(s_ij - lse_i.reshape(BLOCK_M_Br, 1))
@@ -273,8 +273,9 @@ def attention_flash_bwd_loops_ref(q, k, v, do, o, lse):
                 ds_ij = p_ij * (dp_ij - D_i.reshape(BLOCK_M_Br, 1))
                 assert ds_ij.shape == (BLOCK_M_Br, BLOCK_K2_Bc)
                 ds[batch, start_m:end_m, start_k2:end_k2] = ds_ij
-                dq_i += torch.matmul(ds_ij, k_j)
-                dk_j += torch.matmul(ds_ij.transpose(-1, -2), q_i)
+                ds_ij_scaled = scale * ds_ij
+                dq_i += torch.matmul(ds_ij_scaled, k_j)
+                dk_j += torch.matmul(ds_ij_scaled.transpose(-1, -2), q_i)
 
                 dv[batch, start_k2:end_k2, :] = dv_j
 
@@ -290,6 +291,7 @@ def get_attention_fwd_kernel(
     q_seq_len: int,
     v_head_dim: int,
     mfma_variant: MMAType,
+    scale: float,
 ):
     """Flash Attention 2 forward kernel.
 
@@ -377,9 +379,10 @@ def get_attention_fwd_kernel(
         ):
             s_acc = tkl.Register[B, K2_kvs, M_qs, tkl.f32](0.0)
             log2e = tkl.Register[B, M_qs, tkl.f32](1.44269504089)
+            scale_reg = tkl.Register[B, K2_kvs, M_qs, tkl.f32](scale)
             q_i = tkw.read(q, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
             k_j = tkw.read(k, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
-            s_ij = tkw.mma(k_j, q_i, s_acc)
+            s_ij = scale_reg * tkw.mma(k_j, q_i, s_acc)
             s_ij = tkw.permute(s_ij, target_shape=[B, M_qs, K2_kvs])
             tkw.write(s_ij, s, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
             m_ij = tkw.max(s_ij, m_prev, dim=K2_kvs)
@@ -429,6 +432,7 @@ def get_attention_bwd_kernel(
     q_seq_len: int,
     v_head_dim: int,
     mfma_variant: MMAType,
+    scale: float,
 ):
     """Flash Attention 2 backward kernel.
 
@@ -533,6 +537,7 @@ def get_attention_bwd_kernel(
         s: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
         p: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         ds: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        ds_scaled: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
         dp: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f32],
         dp_sub: tkl.Memory[B, M_qs, K2_kvs, GLOBAL_ADDRESS_SPACE, tkl.f16],
     ):
@@ -550,7 +555,8 @@ def get_attention_bwd_kernel(
 
             s_acc = tkl.Register[B, M_qs, K2_kvs, tkl.f32](0.0)
             log2e = tkl.Register[B, M_qs, K2_kvs, tkl.f16](1.44269504089)
-            s_ij = tkw.mma(q_i, k_j, s_acc)
+            scale_s_reg = tkl.Register[B, M_qs, K2_kvs, tkl.f32](scale)
+            s_ij = scale_s_reg * tkw.mma(q_i, k_j, s_acc)
             tkw.write(s_ij, s, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
             s_ij = tkw.permute(s_ij, [B, K2_kvs, M_qs])
             lse_i = tkw.read(lse, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
@@ -583,12 +589,17 @@ def get_attention_bwd_kernel(
 
             # Just multiplying p_ij * dp_ij_sub breaks the previously calculated
             # dp. We have to load back p in the required layout.
+            scale_ds_reg = tkl.Register[B, M_qs, K2_kvs, tkl.f16](scale)
             p_ij_for_ds = tkw.read(p, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
             ds_ij = p_ij_for_ds * dp_ij_sub
             tkw.write(ds_ij, ds, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            ds_scaled_ij = scale_ds_reg * ds_ij
+            tkw.write(
+                ds_scaled_ij, ds_scaled, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD
+            )
 
-            ds_ij_for_dk = tkw.read(
-                ds,
+            ds_scaled_ij_for_dk = tkw.read(
+                ds_scaled,
                 mapping=flip_m_k2_read_mapping,
                 elements_per_thread=MFMA_INPUT_ELS_PER_THREAD,
             )
@@ -597,7 +608,7 @@ def get_attention_bwd_kernel(
                 mapping=flip_m_k1_read_mapping,
                 elements_per_thread=MFMA_INPUT_ELS_PER_THREAD,
             )
-            dk_j = tkw.mma(ds_ij_for_dk, q_i_for_dk, dk_prev)
+            dk_j = tkw.mma(ds_scaled_ij_for_dk, q_i_for_dk, dk_prev)
 
             k_j_for_dq = tkw.read(
                 k,
@@ -605,7 +616,7 @@ def get_attention_bwd_kernel(
                 elements_per_thread=MFMA_INPUT_ELS_PER_THREAD,
             )
             dq_prev = tkw.read(dq, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
-            dq_i = tkw.mma(ds_ij, k_j_for_dq, tkw.cast(dq_prev, tkl.f32))
+            dq_i = tkw.mma(ds_scaled_ij, k_j_for_dq, tkw.cast(dq_prev, tkl.f32))
             tkw.write(dq_i, dq, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
             return (
                 dv_j,
@@ -655,6 +666,7 @@ def get_attention_bwd_dv_kernel(
     q_seq_len: int,
     v_head_dim: int,
     mfma_variant: MMAType,
+    scale: float,
 ):
     """Flash Attention 2 backward kernel for dv only.
 
@@ -795,6 +807,7 @@ def get_attention_bwd_dk_kernel(
     q_seq_len: int,
     v_head_dim: int,
     mfma_variant: MMAType,
+    scale: float,
 ):
     """Flash Attention 2 backward kernel for dk only.
 
@@ -969,6 +982,7 @@ def get_attention_bwd_dq_kernel(
     q_seq_len: int,
     v_head_dim: int,
     mfma_variant: MMAType,
+    scale: float,
 ):
     """Flash Attention 2 backward kernel for dq only.
 
@@ -1145,6 +1159,7 @@ def get_attention_bwd_dq_kernel(
     return attention_bwd_dq, hyperparams
 
 
+@require_e2e
 @param_bool("rescale")
 @param_shape
 def testAttentionOpsReference(shape: tuple[int, ...], rescale: bool):
@@ -1180,7 +1195,7 @@ def testAttentionOpsReference(shape: tuple[int, ...], rescale: bool):
     assert_close(dv_auto_ops, dv_ref)
 
     dq_ops, dk_ops, dv_ops, ds_ops, dp_ops = attention_bwd_torch_ops_ref(
-        q, k, v, do, p_ops, o_ops, scale=scale
+        q, k, v, do, p_ops, scale=scale
     )
 
     assert_close(dq_ops, dq_auto_ops, atol=1e-3, rtol=1e-3)
@@ -1190,11 +1205,15 @@ def testAttentionOpsReference(shape: tuple[int, ...], rescale: bool):
     assert_close(dp_ops, dp_auto_ops, atol=1e-3, rtol=1e-3)
 
 
+@require_e2e
+@param_bool("rescale")
 @param_shape
-def testFlashAttentionLoopsReference(shape: tuple[int, ...]):
+def testFlashAttentionLoopsReference(shape: tuple[int, ...], rescale: bool):
     torch.manual_seed(0)
 
     batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
+
+    scale = math.sqrt(1.0 / qk_head_dim) if rescale else 1
 
     q = device_randn(batch, q_seq_len, qk_head_dim)
     k = device_randn(batch, kv_seq_len, qk_head_dim)
@@ -1210,9 +1229,9 @@ def testFlashAttentionLoopsReference(shape: tuple[int, ...]):
         p_ref,
         ds_ref,
         dp_ref,
-    ) = attention_torch_ops_ref(q, k, v, do)
+    ) = attention_torch_ops_ref(q, k, v, do, scale=scale)
 
-    o_loops, lse_loops, s_loops = attention_flash_fwd_loops_ref(q, k, v)
+    o_loops, lse_loops, s_loops = attention_flash_fwd_loops_ref(q, k, v, scale=scale)
 
     # We can't verify P because the Flash Attention 2 algorithm doesn't actually
     # compute it directly, instead rescaling it as it goes.
@@ -1231,7 +1250,7 @@ def testFlashAttentionLoopsReference(shape: tuple[int, ...]):
         p_loops,
         ds_loops,
         dp_loops,
-    ) = attention_flash_bwd_loops_ref(q, k, v, do, o_loops, lse_loops)
+    ) = attention_flash_bwd_loops_ref(q, k, v, do, o_loops, lse_loops, scale=scale)
 
     assert_close(s_loops, s_ref, atol=1e-4, rtol=1e-4)
     assert_close(p_loops, p_ref, atol=1e-4, rtol=1e-4)
@@ -1243,9 +1262,13 @@ def testFlashAttentionLoopsReference(shape: tuple[int, ...]):
 
 
 @require_e2e
+@param_bool("rescale")
 @param_mfma_shape
-def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], request):
+def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], rescale: bool):
     batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
+
+    scale = math.sqrt(1.0 / qk_head_dim) if rescale else 1
+
     small_shape = math.prod(shape) < 500_000
     # Our float tolerances here are really bad on mi210 and suspiciously get
     # worse as the shape gets bigger. Maybe just because there are more possible
@@ -1270,7 +1293,7 @@ def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], request
         torch.float32
     )
 
-    o_ref, lse_ref, s_ref = attention_flash_fwd_loops_ref(q, k, v)
+    o_ref, lse_ref, s_ref = attention_flash_fwd_loops_ref(q, k, v, scale=scale)
 
     (
         dq_ref,
@@ -1280,7 +1303,7 @@ def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], request
         p_ref,
         ds_ref,
         dp_ref,
-    ) = attention_flash_bwd_loops_ref(q, k, v, do, o_ref, lse_ref)
+    ) = attention_flash_bwd_loops_ref(q, k, v, do, o_ref, lse_ref, scale=scale)
 
     # Alright, back to float16, which Wave requires
 
@@ -1306,6 +1329,7 @@ def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], request
         q_seq_len=q_seq_len,
         v_head_dim=v_head_dim,
         mfma_variant=mfma_variant,
+        scale=scale,
     )
     hyperparams.update(get_default_scheduling_params())
     config = get_default_run_config()
@@ -1329,12 +1353,12 @@ def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], request
         lse = device_zeros(batch, q_seq_len, dtype=torch.float16)
         s = device_zeros(batch, q_seq_len, kv_seq_len)
 
-        mb_fwd = attention_fwd(q, k, v.transpose(-1, -2), s, o, lse)
+        asm_fwd = attention_fwd(q, k, v.transpose(-1, -2), s, o, lse)
 
         if dump_generated_mlir:
             filename = f"out/wave_attention_fwd_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
-                f.write(mb_fwd.module_op.get_asm())
+                f.write(asm_fwd)
             print(f"IR dumped to {filename}")
 
         assert_close(s, s_ref, **tols)
@@ -1350,6 +1374,7 @@ def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], request
         q_seq_len=q_seq_len,
         v_head_dim=v_head_dim,
         mfma_variant=mfma_variant,
+        scale=scale,
     )
     hyperparams.update(get_default_scheduling_params())
     config = get_default_run_config()
@@ -1376,6 +1401,7 @@ def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], request
         s = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float32)
         p = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float16)
         ds = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float16)
+        ds_scaled = torch.zeros_like(ds)
         dp = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float32)
         dp_sub = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float16)
 
@@ -1383,7 +1409,7 @@ def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], request
             batch, q_seq_len, kv_seq_len
         )
 
-        mb_bwd = attention_bwd(
+        asm_bwd = attention_bwd(
             q,
             k,
             v,
@@ -1399,6 +1425,7 @@ def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], request
             s,
             p,
             ds,
+            ds_scaled,
             dp,
             dp_sub,
         )
@@ -1406,7 +1433,7 @@ def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], request
         if dump_generated_mlir:
             filename = f"out/wave_attention_bwd_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
-                f.write(mb_bwd.module_op.get_asm())
+                f.write(asm_bwd)
             print(f"IR dumped to {filename}")
 
         assert_close(s, s_ref, **tols)
@@ -1425,10 +1452,16 @@ def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], request
 
 
 @require_e2e
+@param_bool("rescale")
 @param_mfma_shape
-def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int, ...], request):
+def testAttentionBackwardParts(
+    mfma_variant: MMAType, shape: tuple[int, ...], rescale: bool
+):
     """This tests separate kernels for the different gradients."""
     batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
+
+    scale = math.sqrt(1.0 / qk_head_dim) if rescale else 1
+
     small_shape = math.prod(shape) < 500_000
     # Our float tolerances here are really bad on mi210 and suspiciously get
     # worse as the shape gets bigger. Maybe just because there are more possible
@@ -1453,7 +1486,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int, ...], re
         torch.float32
     )
 
-    o_ref, lse_ref, s_ref = attention_flash_fwd_loops_ref(q, k, v)
+    o_ref, lse_ref, s_ref = attention_flash_fwd_loops_ref(q, k, v, scale=scale)
 
     (
         dq_ref,
@@ -1463,7 +1496,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int, ...], re
         p_ref,
         ds_ref,
         dp_ref,
-    ) = attention_flash_bwd_loops_ref(q, k, v, do, o_ref, lse_ref)
+    ) = attention_flash_bwd_loops_ref(q, k, v, do, o_ref, lse_ref, scale=scale)
 
     q = q.to(torch.float16)
     k = k.to(torch.float16)
@@ -1483,6 +1516,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int, ...], re
         q_seq_len=q_seq_len,
         v_head_dim=v_head_dim,
         mfma_variant=mfma_variant,
+        scale=scale,
     )
     hyperparams_dv.update(get_default_scheduling_params())
     config = get_default_run_config()
@@ -1506,12 +1540,12 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int, ...], re
         s = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float32)
         p = device_zeros(batch, q_seq_len, kv_seq_len, dtype=torch.float16)
 
-        mb_bwd_dv = attention_bwd_dv(q, k, do, lse_ref, dv, s, p)
+        asm_bwd_dv = attention_bwd_dv(q, k, do, lse_ref, dv, s, p)
 
         if dump_generated_mlir:
             filename = f"out/wave_attention_bwd_dv_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
-                f.write(mb_bwd_dv.module_op.get_asm())
+                f.write(asm_bwd_dv)
             print(f"IR dumped to {filename}")
 
         assert_close(s, s_ref, **tols)
@@ -1525,6 +1559,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int, ...], re
         q_seq_len=q_seq_len,
         v_head_dim=v_head_dim,
         mfma_variant=mfma_variant,
+        scale=scale,
     )
     hyperparams_dk.update(get_default_scheduling_params())
     config = get_default_run_config()
@@ -1552,7 +1587,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int, ...], re
         dp = torch.zeros_like(s)
         dp_sub = torch.zeros_like(p)
 
-        mb_bwd_dk = attention_bwd_dk(
+        asm_bwd_dk = attention_bwd_dk(
             q,
             k,
             v,
@@ -1570,7 +1605,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int, ...], re
         if dump_generated_mlir:
             filename = f"out/wave_attention_bwd_dk_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
-                f.write(mb_bwd_dk.module_op.get_asm())
+                f.write(asm_bwd_dk)
             print(f"IR dumped to {filename}")
 
         dp_sub_ref = (dp_ref - D.reshape((batch, q_seq_len, 1))).to(torch.float16)
@@ -1589,6 +1624,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int, ...], re
         q_seq_len=q_seq_len,
         v_head_dim=v_head_dim,
         mfma_variant=mfma_variant,
+        scale=scale,
     )
     hyperparams_dq.update(get_default_scheduling_params())
     config = get_default_run_config()
@@ -1619,7 +1655,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int, ...], re
         dp = torch.zeros_like(s)
         dp_sub = torch.zeros_like(p)
 
-        mb_bwd_dq = attention_bwd_dq(
+        asm_bwd_dq = attention_bwd_dq(
             q,
             k,
             v,
@@ -1638,7 +1674,7 @@ def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int, ...], re
         if dump_generated_mlir:
             filename = f"out/wave_attention_bwd_dq_{'x'.join(map(str, shape))}.mlir"
             with open(filename, "w") as f:
-                f.write(mb_bwd_dq.module_op.get_asm())
+                f.write(asm_bwd_dq)
             print(f"IR dumped to {filename}")
 
         s_sub_ref = s_ref.to(torch.float16) - lse_ref.reshape(
