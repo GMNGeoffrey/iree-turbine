@@ -26,6 +26,7 @@ from ..common.utils import (
     require_e2e,
     enable_scheduling_barriers,
     dump_generated_mlir,
+    param_bool,
 )
 from torch.testing import assert_close
 
@@ -115,6 +116,19 @@ def attention_torch_ops_ref(q, k, v, do, scale=1):
     p = p.detach()
 
     return o, dq, dk, dv, s, p, ds, dp
+
+
+def attention_bwd_torch_ops_ref(q, k, v, do, p, o, scale=1):
+    """Attention backward pass computed with individual Torch operations."""
+
+    dv = torch.matmul(p.transpose(-1, -2), do)
+    dp = torch.matmul(do, v.transpose(-1, -2))
+    D = torch.sum(do * o, -1)
+    ds = p * (dp - D.unsqueeze(-1))
+    dq = torch.matmul(ds, k)
+    dk = torch.matmul(ds.transpose(-1, -2), q)
+
+    return dq, dk, dv, ds, dp
 
 
 def attention_flash_fwd_loops_ref(q, k, v):
@@ -1131,34 +1145,49 @@ def get_attention_bwd_dq_kernel(
     return attention_bwd_dq, hyperparams
 
 
+@param_bool("rescale")
 @param_shape
-def testAttentionOpsReference(shape: tuple[int, ...]):
+def testAttentionOpsReference(shape: tuple[int, ...], rescale: bool):
     torch.manual_seed(0)
 
     batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
+
+    scale = math.sqrt(1.0 / qk_head_dim) if rescale else 1
 
     q = device_randn(batch, q_seq_len, qk_head_dim)
     k = device_randn(batch, kv_seq_len, qk_head_dim)
     v = device_randn(batch, kv_seq_len, v_head_dim)
     do = device_randn(batch, q_seq_len, v_head_dim)
 
-    o_ref, dq_ref, dk_ref, dv_ref = attention_torch_builtin_ref(q, k, v, do)
+    o_ref, dq_ref, dk_ref, dv_ref = attention_torch_builtin_ref(
+        q, k, v, do, scale=scale
+    )
 
     (
         o_ops,
-        dq_ops,
-        dk_ops,
-        dv_ops,
+        dq_auto_ops,
+        dk_auto_ops,
+        dv_auto_ops,
         unused_s_ops,
-        unused_p_ops,
-        unused_ds_ops,
-        unused_dp_ops,
-    ) = attention_torch_ops_ref(q, k, v, do)
+        p_ops,
+        ds_auto_ops,
+        dp_auto_ops,
+    ) = attention_torch_ops_ref(q, k, v, do, scale=scale)
 
     assert_close(o_ops, o_ref)
-    assert_close(dq_ops, dq_ref)
-    assert_close(dk_ops, dk_ref)
-    assert_close(dv_ops, dv_ref)
+    assert_close(dq_auto_ops, dq_ref)
+    assert_close(dk_auto_ops, dk_ref)
+    assert_close(dv_auto_ops, dv_ref)
+
+    dq_ops, dk_ops, dv_ops, ds_ops, dp_ops = attention_bwd_torch_ops_ref(
+        q, k, v, do, p_ops, o_ops, scale=scale
+    )
+
+    assert_close(dq_ops, dq_auto_ops, atol=1e-3, rtol=1e-3)
+    assert_close(dk_ops, dk_auto_ops, atol=1e-3, rtol=1e-3)
+    assert_close(dv_ops, dv_auto_ops, atol=1e-3, rtol=1e-3)
+    assert_close(ds_ops, ds_auto_ops, atol=1e-3, rtol=1e-3)
+    assert_close(dp_ops, dp_auto_ops, atol=1e-3, rtol=1e-3)
 
 
 @param_shape
