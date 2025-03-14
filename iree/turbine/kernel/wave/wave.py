@@ -597,14 +597,15 @@ class LaunchableWave(Launchable):
                     if arg_access:
                         asm = re.sub(rf"{arg_access[0]}\b", f"%{b.name}", asm)
             log2e_matches = re.findall(
-                r"(%\w+) = arith.constant dense<1\.442380e\+00> : vector<(\d+)x(f\d+)>",
+                r"(%\w+) = arith.constant dense<1\.44269502(?:e\+00)?> : vector<(\d+)x(f\d+)>",
                 asm,
             )
             for m in log2e_matches:
                 ssa, v_size, dtype = m
                 asm = re.sub(rf"{ssa}\b", f"%log2e_{v_size}v{dtype}", asm)
             zero_matches = re.findall(
-                r"(%\w+) = arith.constant dense<0\.0*e\+00> : vector<(\d+)x(f\d+)>", asm
+                r"(%\w+) = arith.constant dense<0\.0*(?:e\+00)?> : vector<(\d+)x(f\d+)>",
+                asm,
             )
             for m in zero_matches:
                 ssa, v_size, dtype = m
