@@ -382,7 +382,11 @@ def get_attention_fwd_kernel(
             scale_reg = tkl.Register[B, K2_kvs, M_qs, tkl.f32](scale)
             q_i = tkw.read(q, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
             k_j = tkw.read(k, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
-            s_ij = scale_reg * tkw.mma(k_j, q_i, s_acc)
+            s_unscaled_ij = tkw.mma(k_j, q_i, s_acc)
+            # TODO(#410): This no-op permute works around expansion failing in
+            # the K1 dimension when the scaling factor is added.
+            s_unscaled_ij = tkw.permute(s_unscaled_ij, [B, K2_kvs, M_qs])
+            s_ij = scale_reg * s_unscaled_ij
             s_ij = tkw.permute(s_ij, target_shape=[B, M_qs, K2_kvs])
             tkw.write(s_ij, s, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
             m_ij = tkw.max(s_ij, m_prev, dim=K2_kvs)
