@@ -20,14 +20,12 @@ from iree.turbine.kernel.wave.utils import (
     device_randn,
     device_zeros,
     to_default_device,
-    get_default_device,
 )
 from iree.turbine.kernel.wave.constraints import MMAType
 from ..common.utils import (
     require_e2e,
     enable_scheduling_barriers,
     dump_generated_mlir,
-    param_bool,
 )
 from torch.testing import assert_close
 
@@ -1186,14 +1184,13 @@ def get_attention_bwd_dq_kernel(
 
 
 @require_e2e
-@param_bool("rescale")
 @param_shape
-def testAttentionOpsReference(shape: tuple[int, ...], rescale: bool):
+def testAttentionOpsReference(shape: tuple[int, ...]):
     torch.manual_seed(0)
 
     batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
 
-    scale = math.sqrt(1.0 / qk_head_dim) if rescale else 1
+    scale = math.sqrt(1.0 / qk_head_dim)
 
     q = device_randn(batch, q_seq_len, qk_head_dim)
     k = device_randn(batch, kv_seq_len, qk_head_dim)
@@ -1232,14 +1229,13 @@ def testAttentionOpsReference(shape: tuple[int, ...], rescale: bool):
 
 
 @require_e2e
-@param_bool("rescale")
 @param_shape
-def testFlashAttentionLoopsReference(shape: tuple[int, ...], rescale: bool):
+def testFlashAttentionLoopsReference(shape: tuple[int, ...]):
     torch.manual_seed(0)
 
     batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
 
-    scale = math.sqrt(1.0 / qk_head_dim) if rescale else 1
+    scale = math.sqrt(1.0 / qk_head_dim)
 
     q = device_randn(batch, q_seq_len, qk_head_dim)
     k = device_randn(batch, kv_seq_len, qk_head_dim)
@@ -1288,12 +1284,11 @@ def testFlashAttentionLoopsReference(shape: tuple[int, ...], rescale: bool):
 
 
 @require_e2e
-@param_bool("rescale")
 @param_mfma_shape
-def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], rescale: bool):
+def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...]):
     batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
 
-    scale = math.sqrt(1.0 / qk_head_dim) if rescale else 1
+    scale = math.sqrt(1.0 / qk_head_dim)
 
     tols = dict(atol=3e-3, rtol=3e-3)
 
@@ -1486,15 +1481,12 @@ def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], rescale
 
 
 @require_e2e
-@param_bool("rescale")
 @param_mfma_shape
-def testAttentionBackwardParts(
-    mfma_variant: MMAType, shape: tuple[int, ...], rescale: bool
-):
+def testAttentionBackwardParts(mfma_variant: MMAType, shape: tuple[int, ...]):
     """This tests separate kernels for the different gradients."""
     batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
 
-    scale = math.sqrt(1.0 / qk_head_dim) if rescale else 1
+    scale = math.sqrt(1.0 / qk_head_dim)
 
     tols = dict(atol=3e-3, rtol=3e-3)
 
