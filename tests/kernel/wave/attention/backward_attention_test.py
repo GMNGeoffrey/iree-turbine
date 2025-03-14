@@ -40,6 +40,7 @@ shapes_16x16x16 = [
     (1, 16, 32, 16, 16),
     (1, 32, 16, 16, 16),
     (2, 16, 16, 16, 16),
+    # Bigger shapes
     (2, 64, 128, 32, 256),
     # The batch size 40 mostly just makes things slower. I don't think it helps
     # that much with correctness testing.
@@ -766,12 +767,14 @@ def get_attention_bwd_dv_kernel(
 
             s_acc = tkl.Register[B, M_qs, K2_kvs, tkl.f32](0.0)
             log2e = tkl.Register[B, M_qs, K2_kvs, tkl.f16](1.44269504089)
-            s_ij = tkw.mma(q_i, k_j, s_acc)
-            tkw.write(s_ij, s, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            scale_s_reg = tkl.Register[B, M_qs, K2_kvs, tkl.f32](scale)
+            s_unscaled_ij = tkw.mma(q_i, k_j, s_acc)
             # TODO(#410): a no-op permute here gets past a compiler error
             # resolving node indices. I think it just hides the K1 dimension
             # from the index.
-            s_ij = tkw.permute(s_ij, [B, M_qs, K2_kvs])
+            s_unscaled_ij = tkw.permute(s_unscaled_ij, [B, M_qs, K2_kvs])
+            s_ij = scale_s_reg * s_unscaled_ij
+            tkw.write(s_ij, s, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
             lse_i = tkw.read(lse, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
             p_ij = tkw.exp2(log2e * (tkw.cast(s_ij, tkl.f16) - lse_i))
             tkw.write(p_ij, p, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
@@ -917,12 +920,13 @@ def get_attention_bwd_dk_kernel(
 
             s_acc = tkl.Register[B, M_qs, K2_kvs, tkl.f32](0.0)
             log2e = tkl.Register[B, M_qs, K2_kvs, tkl.f16](1.44269504089)
-            s_ij = tkw.mma(q_i, k_j, s_acc)
+            scale_s_reg = tkl.Register[B, M_qs, K2_kvs, tkl.f32](scale)
+            s_unscaled_ij = tkw.mma(q_i, k_j, s_acc)
+            # TODO(#410): This no-op permute works around expansion failing in
+            # the K1 dimension when the scaling factor is applied.
+            s_unscaled_ij = tkw.permute(s_unscaled_ij, [B, M_qs, K2_kvs])
+            s_ij = scale_s_reg * s_unscaled_ij
             tkw.write(s_ij, s, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
-            # TODO(#410): a no-op permute here gets past a compiler error
-            # resolving node indices. I think it just hides the K1 dimension
-            # from the index.
-            s_ij = tkw.permute(s_ij, [B, M_qs, K2_kvs])
             lse_i = tkw.read(lse, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
             p_ij = tkw.exp2(log2e * (tkw.cast(s_ij, tkl.f16) - lse_i))
             tkw.write(p_ij, p, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
@@ -950,13 +954,15 @@ def get_attention_bwd_dk_kernel(
                 mapping=flip_k2_m_write_mapping,
                 elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD,
             )
+            scale_ds_reg = tkl.Register[B, M_qs, K2_kvs, tkl.f16](scale)
+            ds_scaled_ij = scale_ds_reg * ds_ij
 
             q_i_for_dk = tkw.read(
                 q,
                 mapping=flip_m_k1_read_mapping,
                 elements_per_thread=MFMA_INPUT_ELS_PER_THREAD,
             )
-            dk_j = tkw.mma(ds_ij, q_i_for_dk, dk_prev)
+            dk_j = tkw.mma(ds_scaled_ij, q_i_for_dk, dk_prev)
 
             return dk_j
 
@@ -1095,7 +1101,10 @@ def get_attention_bwd_dq_kernel(
             q_i = tkw.read(q, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
 
             s_acc = tkl.Register[B, K2_kvs, M_qs, tkl.f32](0.0)
-            s_ij = tkw.mma(k_j, q_i, s_acc)
+            scale_s_reg = tkl.Register[B, K2_kvs, M_qs, tkl.f32](scale)
+            s_unscaled_ij = tkw.mma(k_j, q_i, s_acc)
+            s_unscaled_ij = tkw.permute(s_unscaled_ij, [B, K2_kvs, M_qs])
+            s_ij = scale_s_reg * s_unscaled_ij
             # permuting and then writing without a mapping breaks whichever of s
             # and dp is used later in the kernel iff we multiply p_ij and
             # dp_ij_sub to compute ds_ij.
@@ -1134,6 +1143,8 @@ def get_attention_bwd_dq_kernel(
 
             ds_ij = p_ij * dp_ij_sub
             tkw.write(ds_ij, ds, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            scale_ds_reg = tkl.Register[B, M_qs, K2_kvs, tkl.f16](scale)
+            ds_scaled_ij = scale_ds_reg * ds_ij
 
             # permuting doesn't work here. We need to read it in directly in the correct layout.
             k_j_for_dq = tkw.read(
@@ -1142,7 +1153,7 @@ def get_attention_bwd_dq_kernel(
                 elements_per_thread=MFMA_INPUT_ELS_PER_THREAD,
             )
             dq_prev = tkw.read(dq, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
-            dq_i = tkw.mma(ds_ij, k_j_for_dq, tkw.cast(dq_prev, tkl.f32))
+            dq_i = tkw.mma(ds_scaled_ij, k_j_for_dq, tkw.cast(dq_prev, tkl.f32))
             tkw.write(dq_i, dq, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
 
             return dummy_prev
@@ -1485,11 +1496,7 @@ def testAttentionBackwardParts(
 
     scale = math.sqrt(1.0 / qk_head_dim) if rescale else 1
 
-    small_shape = math.prod(shape) < 500_000
-    # Our float tolerances here are really bad on mi210 and suspiciously get
-    # worse as the shape gets bigger. Maybe just because there are more possible
-    # places to fail?
-    tols = dict(atol=3e-2, rtol=5e-3) if small_shape else dict(atol=2e-1, rtol=5e-2)
+    tols = dict(atol=3e-3, rtol=3e-3)
 
     torch.manual_seed(0)
     # doing all this manual stuff in float32 or we lose too much precision. We
@@ -1532,6 +1539,7 @@ def testAttentionBackwardParts(
     dv_ref = dv_ref.to(torch.float16)
     ds_ref = ds_ref.to(torch.float16)
 
+    # *** dv ***
     attention_bwd_dv, hyperparams_dv = get_attention_bwd_dv_kernel(
         batch=batch,
         kv_seq_len=kv_seq_len,
@@ -1575,6 +1583,7 @@ def testAttentionBackwardParts(
         assert_close(p, p_ref, **tols)
         assert_close(dv, dv_ref, **tols)
 
+    # *** dk ***
     attention_bwd_dk, hyperparams_dk = get_attention_bwd_dk_kernel(
         batch=batch,
         kv_seq_len=kv_seq_len,
@@ -1640,6 +1649,7 @@ def testAttentionBackwardParts(
         assert_close(ds, ds_ref, **tols)
         assert_close(dk, dk_ref, **tols)
 
+    # *** dq ***
     attention_bwd_dq, hyperparams_dq = get_attention_bwd_dq_kernel(
         batch=batch,
         kv_seq_len=kv_seq_len,
