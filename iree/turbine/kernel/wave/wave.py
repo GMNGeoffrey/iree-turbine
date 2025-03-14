@@ -434,8 +434,8 @@ class LaunchableWave(Launchable):
             emitter.emit(trace.get_root_graph())
         except:
             print("Error in emitter")
-            asm = mb.module_op.get_asm()
-            print(asm)
+            # asm = mb.module_op.get_asm()
+            # print(asm)
             raise
         emitter.finish()
 
