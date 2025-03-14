@@ -20,6 +20,7 @@ from iree.turbine.kernel.wave.utils import (
     device_randn,
     device_zeros,
     to_default_device,
+    get_default_device,
 )
 from iree.turbine.kernel.wave.constraints import MMAType
 from ..common.utils import (
@@ -35,10 +36,16 @@ shapes_16x16x16 = [
     (1, 16, 16, 16, 16),
     (1, 16, 16, 16, 32),
     (1, 16, 16, 32, 16),
+    (1, 16, 16, 64, 16),
     (1, 16, 32, 16, 16),
     (1, 32, 16, 16, 16),
     (2, 16, 16, 16, 16),
-    # (2, 64, 128, 32, 256),
+    (2, 64, 128, 32, 256),
+    # The batch size 40 mostly just makes things slower. I don't think it helps
+    # that much with correctness testing.
+    (2, 1024, 64, 64, 1024),
+    (8, 128, 128, 64, 256),
+    (40, 1024, 64, 64, 1024),
 ]
 
 
@@ -384,7 +391,7 @@ def get_attention_fwd_kernel(
             k_j = tkw.read(k, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
             s_unscaled_ij = tkw.mma(k_j, q_i, s_acc)
             # TODO(#410): This no-op permute works around expansion failing in
-            # the K1 dimension when the scaling factor is added.
+            # the K1 dimension when the scaling factor is applied.
             s_unscaled_ij = tkw.permute(s_unscaled_ij, [B, K2_kvs, M_qs])
             s_ij = scale_reg * s_unscaled_ij
             s_ij = tkw.permute(s_ij, target_shape=[B, M_qs, K2_kvs])
@@ -560,7 +567,11 @@ def get_attention_bwd_kernel(
             s_acc = tkl.Register[B, M_qs, K2_kvs, tkl.f32](0.0)
             log2e = tkl.Register[B, M_qs, K2_kvs, tkl.f16](1.44269504089)
             scale_s_reg = tkl.Register[B, M_qs, K2_kvs, tkl.f32](scale)
-            s_ij = scale_s_reg * tkw.mma(q_i, k_j, s_acc)
+            s_unscaled_ij = tkw.mma(q_i, k_j, s_acc)
+            # TODO(#410): This no-op permute works around expansion failing in
+            # the K1 dimension when the scaling factor is applied.
+            s_unscaled_ij = tkw.permute(s_unscaled_ij, [B, M_qs, K2_kvs])
+            s_ij = scale_s_reg * s_unscaled_ij
             tkw.write(s_ij, s, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
             s_ij = tkw.permute(s_ij, [B, K2_kvs, M_qs])
             lse_i = tkw.read(lse, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
@@ -1273,11 +1284,7 @@ def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], rescale
 
     scale = math.sqrt(1.0 / qk_head_dim) if rescale else 1
 
-    small_shape = math.prod(shape) < 500_000
-    # Our float tolerances here are really bad on mi210 and suspiciously get
-    # worse as the shape gets bigger. Maybe just because there are more possible
-    # places to fail?
-    tols = dict(atol=3e-2, rtol=5e-3) if small_shape else dict(atol=2e-1, rtol=5e-2)
+    tols = dict(atol=3e-3, rtol=3e-3)
 
     torch.manual_seed(0)
     # doing all this manual stuff in float32 or we lose too much precision. We
@@ -1287,15 +1294,27 @@ def testAttentionBackward(mfma_variant: MMAType, shape: tuple[int, ...], rescale
     q = device_randn(batch, q_seq_len, qk_head_dim, dtype=torch.float16).to(
         torch.float32
     )
+    # q = torch.full((batch, q_seq_len, qk_head_dim), 0.1, device=get_default_device(), dtype=torch.float16).to(
+    #     torch.float32
+    # )
     k = device_randn(batch, kv_seq_len, qk_head_dim, dtype=torch.float16).to(
         torch.float32
     )
+    # k = torch.full((batch, kv_seq_len, qk_head_dim), 0.1, device=get_default_device(), dtype=torch.float16).to(
+    #     torch.float32
+    # )
     v = device_randn(batch, kv_seq_len, v_head_dim, dtype=torch.float16).to(
         torch.float32
     )
+    # v = torch.full((batch, kv_seq_len, v_head_dim), 0.1, device=get_default_device(), dtype=torch.float16).to(
+    #     torch.float32
+    # )
     do = device_randn(batch, q_seq_len, v_head_dim, dtype=torch.float16).to(
         torch.float32
     )
+    # do = torch.full((batch, q_seq_len, v_head_dim), 0.1, device=get_default_device(), dtype=torch.float16).to(
+    #     torch.float32
+    # )
 
     o_ref, lse_ref, s_ref = attention_flash_fwd_loops_ref(q, k, v, scale=scale)
 
