@@ -44,6 +44,7 @@ from ..common.shapes import get_test_shapes
 )
 def testChainedGemm(
     shape: tuple[int],
+    enable_scheduling: bool,
     mfma_variant: MMAType,
     request,
 ):
