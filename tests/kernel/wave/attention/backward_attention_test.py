@@ -114,6 +114,10 @@ def attention_torch_ops_ref(q, k, v, do, scale=1):
     p = torch.softmax(s, dim=-1)
     o = torch.matmul(p, v)
 
+    m = torch.max(s, dim=-1)[0]
+    p_prime = torch.exp(s - m.unsqueeze(-1))
+    lse = m + torch.log(torch.sum(p_prime, dim=-1))
+
     q.retain_grad()
     k.retain_grad()
     v.retain_grad()
@@ -130,7 +134,7 @@ def attention_torch_ops_ref(q, k, v, do, scale=1):
     s = s.detach()
     p = p.detach()
 
-    return o, dq, dk, dv, s, p, ds, dp
+    return o, lse, dq, dk, dv, s, p, ds, dp
 
 
 def attention_bwd_torch_ops_ref(q, k, v, do, p, scale=1):
@@ -749,7 +753,8 @@ def get_attention_bwd_dv_kernel(
             mma_type=mfma_variant,
             # Setting the N vector size here avoids some errors about not being
             # able to compute vector sizes.
-            vector_shapes={B: 0, N_vd: vec_size},
+            # TODO: this is not necessary for 16x16x16 MFMA. Is it still necessary for the 32x32x8?
+            vector_shapes={B: 0},  # , N_vd: vec_size},
         ),
     ]
 
@@ -1242,6 +1247,7 @@ def testAttentionOpsReference(shape: tuple[int, ...]):
 
     (
         o_ops,
+        unused_lse_ops,
         dq_auto_ops,
         dk_auto_ops,
         dv_auto_ops,
@@ -1283,6 +1289,7 @@ def testFlashAttentionLoopsReference(shape: tuple[int, ...]):
 
     (
         o_ref,
+        lse_ref,
         dq_ref,
         dk_ref,
         dv_ref,
@@ -1298,6 +1305,7 @@ def testFlashAttentionLoopsReference(shape: tuple[int, ...]):
     # compute it directly, instead rescaling it as it goes.
     assert_close(o_loops, o_ref, atol=1e-4, rtol=1e-4)
     assert_close(s_loops, s_ref, atol=1e-4, rtol=1e-4)
+    assert_close(lse_loops, lse_ref, atol=1e-4, rtol=1e-4)
 
     dq_loops = torch.zeros_like(q)
     dk_loops = torch.zeros_like(k)
@@ -1320,6 +1328,114 @@ def testFlashAttentionLoopsReference(shape: tuple[int, ...]):
     assert_close(dq_loops, dq_ref, atol=1e-4, rtol=1e-4)
     assert_close(dk_loops, dk_ref, atol=1e-4, rtol=1e-4)
     assert_close(dv_loops, dv_ref, atol=1e-4, rtol=1e-4)
+
+
+@require_e2e
+@param_mfma_shape
+def testFlashAttentionForward(mfma_variant: MMAType, shape: tuple[int, ...]):
+    batch, q_seq_len, v_head_dim, qk_head_dim, kv_seq_len = shape
+
+    scale = math.sqrt(1.0 / qk_head_dim)
+
+    tols = dict(atol=3e-3, rtol=3e-3)
+
+    torch.manual_seed(0)
+    # doing all this manual stuff in float32 or we lose too much precision. We
+    # generate the random numbers in float16 though so we at least start with
+    # something that is representable in that.
+
+    q = device_randn(batch, q_seq_len, qk_head_dim, dtype=torch.float16).to(
+        torch.float32
+    )
+    # q = torch.full((batch, q_seq_len, qk_head_dim), 0.1, device=get_default_device(), dtype=torch.float16).to(
+    #     torch.float32
+    # )
+    k = device_randn(batch, kv_seq_len, qk_head_dim, dtype=torch.float16).to(
+        torch.float32
+    )
+    # k = torch.full((batch, kv_seq_len, qk_head_dim), 0.1, device=get_default_device(), dtype=torch.float16).to(
+    #     torch.float32
+    # )
+    v = device_randn(batch, kv_seq_len, v_head_dim, dtype=torch.float16).to(
+        torch.float32
+    )
+    # v = torch.full((batch, kv_seq_len, v_head_dim), 0.1, device=get_default_device(), dtype=torch.float16).to(
+    #     torch.float32
+    # )
+    do = device_randn(batch, q_seq_len, v_head_dim, dtype=torch.float16).to(
+        torch.float32
+    )
+    # do = torch.full((batch, q_seq_len, v_head_dim), 0.1, device=get_default_device(), dtype=torch.float16).to(
+    #     torch.float32
+    # )
+
+    (
+        o_ref,
+        lse_ref,
+        unused_dq_ref,
+        unused_dk_ref,
+        unused_dv_ref,
+        s_ref,
+        p_ref,
+        unused_ds_ref,
+        unused_dp_ref,
+    ) = attention_torch_ops_ref(q, k, v, do, scale=scale)
+
+    # Alright, back to float16, which Wave requires
+
+    lse_ref = lse_ref.to(torch.float16)
+    p_ref = p_ref.to(torch.float16)
+    o_ref = o_ref.to(torch.float16)
+
+    q = q.to(torch.float16)
+    k = k.to(torch.float16)
+    v = v.to(torch.float16)
+    do = do.to(torch.float16)
+
+    attention_fwd, hyperparams = get_attention_fwd_kernel(
+        batch=batch,
+        kv_seq_len=kv_seq_len,
+        qk_head_dim=qk_head_dim,
+        q_seq_len=q_seq_len,
+        v_head_dim=v_head_dim,
+        mfma_variant=mfma_variant,
+        scale=scale,
+    )
+    hyperparams.update(get_default_scheduling_params())
+    config = get_default_run_config()
+    compile_config = {
+        "waves_per_eu": 2,
+        "denorm_fp_math_f32": "preserve-sign",
+    }
+
+    with tk.gen.TestLaunchContext(
+        hyperparams,
+        canonicalize=True,
+        run=True,
+        run_bench=False,
+        run_config=config,
+        compile_config=compile_config,
+        schedule=False,
+        use_scheduling_barriers=enable_scheduling_barriers,
+    ):
+
+        o = device_zeros(batch, q_seq_len, v_head_dim, dtype=torch.float16)
+        lse = device_zeros(batch, q_seq_len, dtype=torch.float16)
+        s = device_zeros(batch, q_seq_len, kv_seq_len)
+
+        asm_fwd = attention_fwd(q, k, v.transpose(-1, -2), s, o, lse)
+
+        if dump_generated_mlir:
+            filename = f"out/wave_attention_fwd_{'x'.join(map(str, shape))}.mlir"
+            with open(filename, "w") as f:
+                f.write(asm_fwd)
+            print(f"IR dumped to {filename}")
+
+        assert_close(s, s_ref, **tols)
+        # Can't check P, since we don't actually compute the "real" thing in the
+        # forward pass, but rather rescale as we go.
+        assert_close(lse, lse_ref, **tols)
+        assert_close(o, o_ref, **tols)
 
 
 @require_e2e
