@@ -11,6 +11,7 @@ from iree.turbine.kernel._support.tracing import CapturedTrace
 import torch.fx as fx
 from ..ops.wave_ops import *
 from ..lang.global_symbols import *
+import sympy
 
 logger = get_logger("turbine.wave.hoisting")
 
@@ -52,7 +53,7 @@ def get_hoistable_ops(
             index_start = {k: i.start for k, i in custom_node.index.items()}
             try:
                 if any(
-                    ind.start.has(induction_variable)
+                    sympy.sympify(ind.start).has(induction_variable)
                     for ind in custom_node.index.values()
                 ):
                     continue
