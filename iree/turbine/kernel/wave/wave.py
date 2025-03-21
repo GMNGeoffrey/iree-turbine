@@ -648,6 +648,18 @@ class LaunchableWave(Launchable):
         if compile_config.get("print_grid", False):
             print(f"Grid: {self.grid_type}")
 
+        # Add grid and block dims to kernel launch info.
+        dynamic_symbols_map = kwargs.get("dynamic_symbols_map", {})
+        try_convert_to_int = lambda x: int(x) if isinstance(x, sympy.Integer) else x
+        kernel_launch_info.grid = [
+            try_convert_to_int(safe_subs(x, dynamic_symbols_map))
+            for x in self.grid_type.dims
+        ]
+        kernel_launch_info.blocks = [
+            int(x) for x in get_hardware_constraint(self.constraints).threads_per_block
+        ]
+        kernel_launch_info.func_name = self._name
+
         mb, trace, exe, kernel_sig, entrypoint_name = self.compile_to_mlir(
             trace, context, module_op, *args, **kwargs
         )
