@@ -34,8 +34,8 @@ big_shapes = [
     (2, 64, 128, 32, 256),
     # The batch size 40 mostly just makes things slower. I don't think it helps
     # that much with correctness testing.
-    # (2, 1024, 64, 64, 1024),
-    # (8, 128, 128, 64, 256),
+    (2, 1024, 64, 64, 1024),
+    (8, 128, 128, 64, 256),
     # (40, 1024, 64, 64, 1024),
 ]
 
@@ -67,7 +67,7 @@ param_mfma_shape = pytest.mark.parametrize(
     "mfma_variant,shape",
     (
         [(MMAType.F32_16x16x16_F16, shape) for shape in shapes_16x16x16 + big_shapes]
-        # + [(MMAType.F32_32x32x8_F16, shape) for shape in shapes_32x32x32 + big_shapes]
+        + [(MMAType.F32_32x32x8_F16, shape) for shape in shapes_32x32x32 + big_shapes]
     ),
     ids=get_param_id,
 )
