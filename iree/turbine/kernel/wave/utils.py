@@ -341,8 +341,8 @@ def is_reshape_needed(
         if dim not in vector_shapes:
             # Ignore nodes that are not used in both mmas.
             return False
-            if node_vector_shapes[dim] != vector_shapes[dim]:
-                return True
+        if node_vector_shapes[dim] != vector_shapes[dim]:
+            return True
     return False
 
 
