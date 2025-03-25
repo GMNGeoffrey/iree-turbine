@@ -105,6 +105,7 @@ def get_repro_603_kernel(
     def repro_603(
         a: tkl.Memory[K, N, GLOBAL_ADDRESS_SPACE, tkl.f16],
         b: tkl.Memory[M, N, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        e: tkl.Memory[M, K, GLOBAL_ADDRESS_SPACE, tkl.f16],
         c: tkl.Memory[K, M, GLOBAL_ADDRESS_SPACE, tkl.f32],
         d: tkl.Memory[M, N, GLOBAL_ADDRESS_SPACE, tkl.f16],
     ):
@@ -112,30 +113,28 @@ def get_repro_603_kernel(
 
         @tkw.reduction(K, init_args=[d_reg])
         def loop_m(d_acc: tkl.Register[M, N, tkl.f32]):
-            a_i_for_c = tkw.read(a, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
-            b_j = tkw.read(b, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
+            a_reg_for_c = tkw.read(a, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
+            b_reg = tkw.read(b, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
 
             c_acc = tkl.Register[K, M, tkl.f32](0.0)
-            c_ij = tkw.mma(a_i_for_c, b_j, c_acc)
-            tkw.write(c_ij, c, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
+            c_acc = tkw.mma(a_reg_for_c, b_reg, c_acc)
+            tkw.write(c_acc, c, elements_per_thread=MFMA_OUTPUT_ELS_PER_THREAD)
 
-            # TODO(#410): we have to permute first or the cast gets confused.
-            c_ij = tkw.permute(c_ij, [M, K])
-            c_ij = tkw.cast(c_ij, tkl.f16)
+            e_reg = tkw.read(e, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD)
 
             # TODO(#603): Wave has implicit layout requirements for MMAs, so we
             # have to read q again.
             if read_twice:
-                a_i_for_d = tkw.read(
+                a_reg_for_d = tkw.read(
                     a,
                     mapping=flip_n_k_read_mapping,
                     elements_per_thread=MFMA_INPUT_ELS_PER_THREAD,
                 )
             else:
-                a_i_for_d = tkw.permute(a_i_for_c, [N, K])
-            d_j = tkw.mma(c_ij, a_i_for_d, d_acc)
+                a_reg_for_d = tkw.permute(a_reg_for_c, [N, K])
+            d_acc = tkw.mma(e_reg, a_reg_for_d, d_acc)
 
-            return d_j
+            return d_acc
 
         tkw.write(
             tkw.cast(loop_m, tkl.f16),
@@ -167,9 +166,10 @@ def testRepro603(mfma_variant: MMAType, shape: tuple[int, ...], read_twice: bool
 
     a = device_randn(dim_k, dim_n, dtype=torch.float16) / 10
     b = device_randn(dim_m, dim_n, dtype=torch.float16) / 10
+    e = device_randn(dim_m, dim_k, dtype=torch.float16) / 10
 
     c_ref = torch.matmul(a, b.transpose(-1, -2))
-    d_ref = torch.matmul(c_ref.transpose(-1, -2), a)
+    d_ref = torch.matmul(e, a)
 
     repro_603, hyperparams = get_repro_603_kernel(
         dim_m=dim_m,
@@ -190,7 +190,7 @@ def testRepro603(mfma_variant: MMAType, shape: tuple[int, ...], read_twice: bool
     c = device_zeros(dim_k, dim_m, dtype=torch.float32)
     d = torch.zeros_like(b)
 
-    asm = repro_603(a, b, c, d)
+    asm = repro_603(a, b, e, c, d)
 
     if dump_generated_mlir:
         filename = f"out/wave_repro_603_read_{'twice' if read_twice else 'once'}_{'x'.join(map(str, shape))}.mlir"
