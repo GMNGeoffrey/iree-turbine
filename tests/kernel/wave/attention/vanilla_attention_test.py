@@ -212,6 +212,7 @@ def testAttentionPure(
         filename = f"wave_attention_{'x'.join(map(str, input_shape))}.mlir"
         with open(filename, "w") as f:
             f.write(asm)
+        print(f"IR dumped to {filename}")
 
     assert_close(output, torch_ref, check_dtype=False, atol=1e-3, rtol=1e-3)
 

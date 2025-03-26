@@ -18,6 +18,7 @@ _perf_test_shapes = {}
 
 # Order of shapes: (B, M, N, K1, K2)
 _e2e_test_shapes["attention"] = [
+    (1, 16, 16, 16, 16),
     (8, 128, 128, 64, 256),
     (40, 1024, 64, 64, 1024),
 ]
