@@ -183,6 +183,7 @@ def testRepro603(mfma_variant: MMAType, shape: tuple[int, ...], read_twice: bool
         subs=hyperparams,
         waves_per_eu=2,
         denorm_fp_math_f32="preserve-sign",
+        canonicalize=True,
     )
     options = set_default_run_config(options)
     repro_603 = wave_compile(options, repro_603)
