@@ -296,8 +296,8 @@ def testRepro603(mfma_variant: MMAType, shape: tuple[int, ...], read_twice: bool
     # a = device_randn(dim_k, dim_n, dtype=torch.float16) / 10
     # a = make_tensor(dim_k, dim_n, dtype=torch.float16, device=get_default_device(), low=0.001, high=0.1)
     a = torch.arange(
-        0, 256, 1, device=get_default_device(), dtype=torch.float16
-    ).reshape(16, 16)
+        0, dim_k * dim_n, 1, device=get_default_device(), dtype=torch.float16
+    ).reshape(dim_k, dim_n)
     b = device_randn(dim_m, dim_n, dtype=torch.float16) / 10
     e = device_randn(dim_m, dim_k, dtype=torch.float16) / 10
 
@@ -341,21 +341,16 @@ def testRepro603(mfma_variant: MMAType, shape: tuple[int, ...], read_twice: bool
 
 
 @require_e2e
-def testOverrideAsm():
-    mfma_variant = MMAType.F32_16x16x16_F16
-    shape = 16, 16, 16
-
+@param_mfma_shape
+def testOverrideAsm(mfma_variant: MMAType, shape: tuple[int, ...]):
     torch.manual_seed(0)
     dim_m, dim_n, dim_k = shape
     cmp_params = dict(atol=3e-3, rtol=3e-3, check_dtype=False)
 
     # a = device_randn(dim_k, dim_n, dtype=torch.float16) / 10
-    # a = device_zeros(dim_k, dim_n, dtype=torch.float16)
-    # a[:4, :4] = torch.arange(16, dtype=torch.float16).reshape(4, 4)
-
     a = torch.arange(
-        0, 256, 1, device=get_default_device(), dtype=torch.float16
-    ).reshape(16, 16)
+        0, dim_k * dim_n, 1, device=get_default_device(), dtype=torch.float16
+    ).reshape(dim_k, dim_n)
 
     b = device_randn(dim_m, dim_n, dtype=torch.float16) / 10
     e = device_randn(dim_m, dim_k, dtype=torch.float16) / 10
@@ -364,8 +359,6 @@ def testOverrideAsm():
 
     c_ref = torch.matmul(a, b.transpose(-1, -2))
     d_ref = torch.matmul(e, a)
-
-    bad_d_ref = torch.matmul(e, a.transpose(-1, -2))
 
     repro_603, hyperparams = get_repro_603_kernel(
         dim_m=dim_m,
@@ -400,7 +393,7 @@ def testOverrideAsm():
     repro_603(a, b, e, a_transpose, c, d)
 
     assert_close(c, c_ref, **cmp_params)
-    print(small_tensor_string(a, "a", precision=0, sci_mode=False))
+    # print(small_tensor_string(a, "a", precision=0, sci_mode=False))
     assert_close(a_transpose, a.transpose(-1, -2), atol=0, rtol=0)
     assert_close(d, d_ref, **cmp_params)
 

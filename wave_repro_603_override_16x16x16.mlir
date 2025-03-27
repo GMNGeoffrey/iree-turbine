@@ -17,34 +17,35 @@ module attributes {transform.with_named_sequence} {
         %c0_4vf32 = arith.constant dense<0.000000e+00> : vector<4xf32>
         %workgroup_id_0 = stream.dispatch.workgroup.id[0] : index
         %workgroup_id_1 = stream.dispatch.workgroup.id[1] : index
-        %b = stream.binding.subspan %arg_b[%c0] : !stream.binding -> memref<16x16xf16, strided<[16, 1], offset: ?>>
+        %thread_id_x = gpu.thread_id  x
         %a = stream.binding.subspan %arg_a[%c0] : !stream.binding -> memref<16x16xf16, strided<[16, 1], offset: ?>>
+        %b = stream.binding.subspan %arg_b[%c0] : !stream.binding -> memref<16x16xf16, strided<[16, 1], offset: ?>>
         %c = stream.binding.subspan %arg_c[%c0] : !stream.binding -> memref<16x16xf32, strided<[16, 1], offset: ?>>
         %e = stream.binding.subspan %arg_e[%c0] : !stream.binding -> memref<16x16xf16, strided<[16, 1], offset: ?>>
         %a_transpose = stream.binding.subspan %arg_a_transpose[%c0] : !stream.binding -> memref<16x16xf16, strided<[16, 1], offset: ?>>
-        %thread_id_x = gpu.thread_id  x
+        %d = stream.binding.subspan %arg_d[%c0] : !stream.binding -> memref<16x16xf16, strided<[16, 1], offset: ?>>
         %1 = arith.muli %workgroup_id_0, %c16 overflow<nsw, nuw> : index
         %2 = arith.remsi %thread_id_x, %c16 : index
         %3 = arith.addi %2, %1 overflow<nsw, nuw> : index
-        %x_mod_16 = arith.remsi %thread_id_x, %c64 : index
-        %5 = arith.divsi %x_mod_16, %c16 : index
+        %x_mod_tpw = arith.remsi %thread_id_x, %c64 : index
+        %5 = arith.divsi %x_mod_tpw, %c16 : index
         %6 = arith.muli %5, %c4 overflow<nsw, nuw> : index
         %7 = arith.muli %workgroup_id_1, %c16 overflow<nsw, nuw> : index
         %8 = arith.addi %7, %6 overflow<nsw, nuw> : index
         %a_reg = vector.load %a[%2, %8] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<4xf16>
         %b_reg = vector.load %b[%3, %8] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<4xf16>
-        %15 = amdgpu.mfma %a_reg * %b_reg + %c0_4vf32 {blocks = 1 : i32, k = 16 : i32, m = 16 : i32, n = 16 : i32} blgp =  none : vector<4xf16>, vector<4xf16>, vector<4xf32>
-        %16 = vector.extract_strided_slice %15 {offsets = [0], sizes = [1], strides = [1]} : vector<4xf32> to vector<1xf32>
-        vector.store %16, %c[%6, %3] : memref<16x16xf32, strided<[16, 1], offset: ?>>, vector<1xf32>
-        %17 = vector.extract_strided_slice %15 {offsets = [1], sizes = [1], strides = [1]} : vector<4xf32> to vector<1xf32>
-        %18 = arith.addi %6, %c1 overflow<nsw, nuw> : index
-        vector.store %17, %c[%18, %3] : memref<16x16xf32, strided<[16, 1], offset: ?>>, vector<1xf32>
-        %19 = vector.extract_strided_slice %15 {offsets = [2], sizes = [1], strides = [1]} : vector<4xf32> to vector<1xf32>
-        %20 = arith.addi %6, %c2 overflow<nsw, nuw> : index
-        vector.store %19, %c[%20, %3] : memref<16x16xf32, strided<[16, 1], offset: ?>>, vector<1xf32>
-        %21 = vector.extract_strided_slice %15 {offsets = [3], sizes = [1], strides = [1]} : vector<4xf32> to vector<1xf32>
-        %22 = arith.addi %6, %c3 overflow<nsw, nuw> : index
-        vector.store %21, %c[%22, %3] : memref<16x16xf32, strided<[16, 1], offset: ?>>, vector<1xf32>
+        %49 = amdgpu.mfma %a_reg * %b_reg + %c0_4vf32 {blocks = 1 : i32, k = 16 : i32, m = 16 : i32, n = 16 : i32} blgp =  none : vector<4xf16>, vector<4xf16>, vector<4xf32>
+        %50 = vector.extract_strided_slice %49 {offsets = [0], sizes = [1], strides = [1]} : vector<4xf32> to vector<1xf32>
+        vector.store %50, %c[%6, %3] : memref<16x16xf32, strided<[16, 1], offset: ?>>, vector<1xf32>
+        %52 = vector.extract_strided_slice %49 {offsets = [1], sizes = [1], strides = [1]} : vector<4xf32> to vector<1xf32>
+        %53 = arith.addi %6, %c1 overflow<nsw, nuw> : index
+        vector.store %52, %c[%53, %3] : memref<16x16xf32, strided<[16, 1], offset: ?>>, vector<1xf32>
+        %54 = vector.extract_strided_slice %49 {offsets = [2], sizes = [1], strides = [1]} : vector<4xf32> to vector<1xf32>
+        %55 = arith.addi %6, %c2 overflow<nsw, nuw> : index
+        vector.store %54, %c[%55, %3] : memref<16x16xf32, strided<[16, 1], offset: ?>>, vector<1xf32>
+        %56 = vector.extract_strided_slice %49 {offsets = [3], sizes = [1], strides = [1]} : vector<4xf32> to vector<1xf32>
+        %57 = arith.addi %6, %c3 overflow<nsw, nuw> : index
+        vector.store %56, %c[%57, %3] : memref<16x16xf32, strided<[16, 1], offset: ?>>, vector<1xf32>
         %e_reg = vector.load %e[%3, %6] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<4xf16>
 
         // GPU shuffle here
@@ -136,24 +137,24 @@ module attributes {transform.with_named_sequence} {
         %a_t_reg3_ext = vector.insert %get3, %a_t_reg2_ext[%dest3_idx] : f32 into vector<4xf32>
 
         %a_t_reg = arith.truncf %a_t_reg3_ext : vector<4xf32> to vector<4xf16>
+        // End GPU Shuffle
 
         vector.store %a_t_reg, %a_transpose[%2, %8] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<4xf16>
-        %24 = amdgpu.mfma %e_reg * %a_t_reg + %c0_4vf32 {blocks = 1 : i32, k = 16 : i32, m = 16 : i32, n = 16 : i32} blgp =  none : vector<4xf16>, vector<4xf16>, vector<4xf32>
-        %25 = arith.truncf %24 : vector<4xf32> to vector<4xf16>
-        %26 = vector.extract_strided_slice %25 {offsets = [0], sizes = [1], strides = [1]} : vector<4xf16> to vector<1xf16>
-        %d = stream.binding.subspan %arg_d[%c0] : !stream.binding -> memref<16x16xf16, strided<[16, 1], offset: ?>>
-        %28 = arith.addi %1, %6 overflow<nsw, nuw> : index
-        %29 = arith.addi %2, %7 overflow<nsw, nuw> : index
-        vector.store %26, %d[%28, %29] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<1xf16>
-        %30 = vector.extract_strided_slice %25 {offsets = [1], sizes = [1], strides = [1]} : vector<4xf16> to vector<1xf16>
-        %31 = arith.addi %28, %c1 overflow<nsw, nuw> : index
-        vector.store %30, %d[%31, %29] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<1xf16>
-        %32 = vector.extract_strided_slice %25 {offsets = [2], sizes = [1], strides = [1]} : vector<4xf16> to vector<1xf16>
-        %33 = arith.addi %28, %c2 overflow<nsw, nuw> : index
-        vector.store %32, %d[%33, %29] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<1xf16>
-        %34 = vector.extract_strided_slice %25 {offsets = [3], sizes = [1], strides = [1]} : vector<4xf16> to vector<1xf16>
-        %35 = arith.addi %28, %c3 overflow<nsw, nuw> : index
-        vector.store %34, %d[%35, %29] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<1xf16>
+        %34 = amdgpu.mfma %e_reg * %a_t_reg + %c0_4vf32 {blocks = 1 : i32, k = 16 : i32, m = 16 : i32, n = 16 : i32} blgp =  none : vector<4xf16>, vector<4xf16>, vector<4xf32>
+        %35 = arith.truncf %34 : vector<4xf32> to vector<4xf16>
+        %36 = vector.extract_strided_slice %35 {offsets = [0], sizes = [1], strides = [1]} : vector<4xf16> to vector<1xf16>
+        %38 = arith.addi %1, %6 overflow<nsw, nuw> : index
+        %39 = arith.addi %2, %7 overflow<nsw, nuw> : index
+        vector.store %36, %d[%38, %39] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<1xf16>
+        %40 = vector.extract_strided_slice %35 {offsets = [1], sizes = [1], strides = [1]} : vector<4xf16> to vector<1xf16>
+        %41 = arith.addi %38, %c1 overflow<nsw, nuw> : index
+        vector.store %40, %d[%41, %39] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<1xf16>
+        %42 = vector.extract_strided_slice %35 {offsets = [2], sizes = [1], strides = [1]} : vector<4xf16> to vector<1xf16>
+        %43 = arith.addi %38, %c2 overflow<nsw, nuw> : index
+        vector.store %42, %d[%43, %39] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<1xf16>
+        %44 = vector.extract_strided_slice %35 {offsets = [3], sizes = [1], strides = [1]} : vector<4xf16> to vector<1xf16>
+        %45 = arith.addi %38, %c3 overflow<nsw, nuw> : index
+        vector.store %44, %d[%45, %39] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<1xf16>
         return
       }
     }
