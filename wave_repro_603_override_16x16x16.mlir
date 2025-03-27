@@ -118,7 +118,24 @@ module attributes {transform.with_named_sequence} {
         %get2, %valid2 = gpu.shuffle idx %offer2, %src_thread2_i32, %wave_size_i32 : f32
         %a_t_reg2_ext = vector.insert %get2, %a_t_reg1_ext[%dest2_idx] : f32 into vector<4xf32>
 
-        %a_t_reg = arith.truncf %a_t_reg2_ext : vector<4xf32> to vector<4xf16>
+        // shuff_i = 3
+        %shuff3 = arith.constant 3 : index
+        %x_plus_shuff3 = arith.addi %thread_id_x, %shuff3 : index
+        %dest3_idx = arith.remsi %x_plus_shuff3, %els_per_thread : index
+
+        %tmp3_0 = arith.addi %x_div_ept_times_16, %dest3_idx : index
+        %tmp3_1 = arith.remsi %tmp3_0, %wave_size : index
+        %src_thread3_idx = arith.addi %tmp3_1, %x_div_16_times_ept : index
+        %src_thread3_i32 = arith.index_cast %src_thread3_idx : index to i32
+
+        %tmp3_2 = arith.subi %x_plus_ept, %shuff3 : index
+        %offer3_idx = arith.remsi %tmp3_2, %els_per_thread : index
+        %offer3 = vector.extract %a_reg_ext[%offer3_idx] : f32 from vector<4xf32>
+
+        %get3, %valid3 = gpu.shuffle idx %offer3, %src_thread3_i32, %wave_size_i32 : f32
+        %a_t_reg3_ext = vector.insert %get3, %a_t_reg2_ext[%dest3_idx] : f32 into vector<4xf32>
+
+        %a_t_reg = arith.truncf %a_t_reg3_ext : vector<4xf32> to vector<4xf16>
 
         vector.store %a_t_reg, %a_transpose[%2, %8] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<4xf16>
         %24 = amdgpu.mfma %e_reg * %a_reg + %c0_4vf32 {blocks = 1 : i32, k = 16 : i32, m = 16 : i32, n = 16 : i32} blgp =  none : vector<4xf16>, vector<4xf16>, vector<4xf32>
