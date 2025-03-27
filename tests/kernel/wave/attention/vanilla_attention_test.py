@@ -126,7 +126,7 @@ def testTransposedVAttentionPure(
     )
 
     if dump_generated_mlir:
-        filename = f"wave_attention_{'x'.join(map(str, input_shape))}.mlir"
+        filename = f"out/wave_attention_{'x'.join(map(str, input_shape))}.mlir"
         with open(filename, "w") as f:
             f.write(asm)
 
@@ -190,6 +190,7 @@ def testAttentionPure(
         benchmark_results_file=(
             os.path.join(dump_perf, "tk_" + perf_filename) if dump_perf else None
         ),
+        canonicalize=True,
     )
 
     options = set_default_run_config(options)
@@ -209,7 +210,7 @@ def testAttentionPure(
     )
 
     if dump_generated_mlir:
-        filename = f"wave_attention_{'x'.join(map(str, input_shape))}.mlir"
+        filename = f"out/wave_attention_{'x'.join(map(str, input_shape))}.mlir"
         with open(filename, "w") as f:
             f.write(asm)
         print(f"IR dumped to {filename}")
@@ -292,7 +293,7 @@ def testAttentionCausal(
     )
 
     if dump_generated_mlir:
-        filename = f"wave_attention_{'x'.join(map(str, shape))}.mlir"
+        filename = f"out/wave_attention_{'x'.join(map(str, shape))}.mlir"
         with open(filename, "w") as f:
             f.write(asm)
 
@@ -493,7 +494,7 @@ def testAttentionBias(
     torch_ref = torch.matmul(a, v)
 
     if dump_generated_mlir:
-        filename = f"wave_attention_{'x'.join(map(str, shape))}.mlir"
+        filename = f"out/wave_attention_{'x'.join(map(str, shape))}.mlir"
         with open(filename, "w") as f:
             f.write(asm)
 
@@ -698,7 +699,7 @@ def testAttentionSoftCap(
     torch_ref = torch.matmul(a, v)
 
     if dump_generated_mlir:
-        filename = f"wave_attention_{'x'.join(map(str, shape))}.mlir"
+        filename = f"out/wave_attention_{'x'.join(map(str, shape))}.mlir"
         with open(filename, "w") as f:
             f.write(asm)
 
@@ -872,7 +873,7 @@ def testAttentionF8(
         q, k, v, attn_mask=None
     )
     if dump_generated_mlir:
-        filename = f"wave_attention_{'x'.join(map(str, shape))}.mlir"
+        filename = f"out/wave_attention_{'x'.join(map(str, shape))}.mlir"
         with open(filename, "w") as f:
             f.write(asm)
     rmse = torch.sqrt(torch.mean(torch.square(output - torch_ref)))

@@ -441,7 +441,11 @@ def propagate_indices(
                 source, source_index, source_vector_shapes, symbolic_constraints
             ):
                 continue
-            source_index = source.transform_index(source_index)
+            try:
+                source_index = source.transform_index(source_index)
+            except Exception as e:
+                print(source_index)
+                raise
             source.index = combine_indices(source.index, source_index)
             source.vector_shapes = source_vector_shapes
             append_aliased_shapes(source, symbolic_constraints)

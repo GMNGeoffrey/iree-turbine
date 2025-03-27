@@ -4,6 +4,8 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+
+import pathlib
 import pytest
 import torch
 from torch.nn import functional as F
@@ -24,6 +26,7 @@ from iree.turbine.kernel.wave.utils.run_utils import (
 from iree.turbine.kernel.wave.utils.torch_utils import (
     device_randn,
     device_zeros,
+    get_default_device,
 )
 from iree.turbine.kernel.wave.compile import WaveCompileOptions, wave_compile
 from iree.turbine.kernel.wave.constraints import MMAType
@@ -201,3 +204,182 @@ def testRepro603(mfma_variant: MMAType, shape: tuple[int, ...], read_twice: bool
 
     assert_close(c, c_ref, **cmp_params)
     assert_close(d, d_ref, **cmp_params)
+
+
+def small_tensor_string(
+    t, name="", row_limit=50, col_limit=150, min_important_value=1e-5
+):
+    # Unfortunately, pytest usually captures the output and so we can't access the real width here :-(
+    # col_limit = col_limit or shutil.get_terminal_size().columns
+    shape = "x".join([str(i) for i in t.shape])
+    if len(t.shape) > 2:
+        t = t.squeeze()
+    if len(t.shape) < 2:
+        t = t.unsqueeze(0)
+
+    abs = torch.abs(t)
+    # Things large enough that we can't round them off to zero and small enough
+    # that we need scientific notation to print them or if anything's big enough
+    # that we need scientific notation.
+    sci_mode = (
+        torch.any(torch.logical_and(abs > min_important_value, abs < 1e-3))
+        or torch.max(abs) > 1e3
+    )
+    sci_mode = False
+
+    def fallback():
+        with torch._tensor_str.printoptions(
+            precision=2 if sci_mode else 3,
+            linewidth=col_limit,
+            sci_mode=sci_mode,
+            threshold=0,
+        ):
+            return f"{name}[{shape}], {t.dtype}:\n{t}"
+
+    if len(t.shape) > 2 or t.shape[0] > row_limit:
+        return fallback()
+
+    def f_entry(d, width=0):
+        return f"{d: {width}.2e}" if sci_mode else f"{d: {width}.0f}"
+
+    width = max(len(f_entry(d)) for d in t.flatten().tolist())
+
+    row_width = len(" ".join(f_entry(d, width) for d in t[0].tolist()))
+
+    if row_width > col_limit:
+        return fallback()
+
+    rows = []
+    for row in t:
+        rows.append(" ".join(f_entry(d, width) for d in row.tolist()))
+
+    nl = "\n"
+    return f"{name}[{shape}], {t.dtype}:\n{nl.join(rows)}"
+
+
+@require_e2e
+@param_mfma_shape
+def testOverrideAsm(mfma_variant: MMAType, shape: tuple[int, ...]):
+    torch.manual_seed(0)
+    dim_m, dim_n, dim_k = shape
+    cmp_params = dict(atol=3e-3, rtol=3e-3, check_dtype=False)
+
+    # a = device_randn(dim_k, dim_n, dtype=torch.float16) / 10
+    a = device_zeros(dim_k, dim_n, dtype=torch.float16)
+    a[:4, :4] = torch.arange(16, dtype=torch.float16).reshape(4, 4)
+
+    b = device_randn(dim_m, dim_n, dtype=torch.float16) / 10
+    # e = device_randn(dim_m, dim_k, dtype=torch.float16) / 10
+    e = device_zeros(dim_m, dim_k, dtype=torch.float16)
+    e[:4, :4] = torch.arange(16, 32, dtype=torch.float16).reshape(4, 4)
+
+    c_ref = torch.matmul(a, b.transpose(-1, -2))
+    d_ref = torch.matmul(e, a)
+
+    bad_d_ref = torch.matmul(e, a.transpose(-1, -2))
+
+    repro_603, hyperparams = get_repro_603_kernel(
+        dim_m=dim_m,
+        dim_n=dim_n,
+        dim_k=dim_k,
+        mfma_variant=mfma_variant,
+        read_twice=False,
+    )
+    hyperparams.update(get_default_scheduling_params())
+
+    asm_path = pathlib.Path(f"wave_repro_603_override_{'x'.join(map(str, shape))}.mlir")
+    # asm_path = "out" / pathlib.Path(f"wave_repro_603_read_once_{'x'.join(map(str, shape))}.mlir")
+    asm = asm_path.read_text()
+
+    options = WaveCompileOptions(
+        subs=hyperparams,
+        waves_per_eu=2,
+        denorm_fp_math_f32="preserve-sign",
+        override_mlir=asm,
+    )
+    options = set_default_run_config(options)
+    repro_603 = wave_compile(options, repro_603)
+
+    c = device_zeros(dim_k, dim_m, dtype=torch.float32)
+    d = torch.zeros_like(b)
+
+    asm = repro_603(a, b, e, c, d)
+
+    if dump_generated_mlir:
+        filepath = "out" / asm_path
+        filepath.write_text(asm)
+        print(f"IR dumped to {filepath}")
+
+    assert_close(c, c_ref, **cmp_params)
+    print(small_tensor_string(e, "e"))
+    print(small_tensor_string(a, "a"))
+    # assert not torch.allclose(d, bad_d_ref, atol=3e-3, rtol=3e-3)
+    assert_close(d, d_ref, **cmp_params)
+
+
+def get_transpose_kernel(dim_size: int):
+    M = tkl.sym.M
+    N = tkl.sym.N
+
+    BLOCK_N = tkl.sym.BLOCK_N
+    BLOCK_M = tkl.sym.BLOCK_M
+
+    constraints: list[tkw.Constraint] = [
+        tkw.WorkgroupConstraint(M, BLOCK_M, 0),
+        tkw.WorkgroupConstraint(N, BLOCK_N, 1),
+        tkw.HardwareConstraint(
+            threads_per_wave=64,
+            waves_per_block=(1, 1, 1),
+            vector_shapes={M: dim_size, N: dim_size},
+            max_bits_per_load=512,
+        ),
+    ]
+
+    @tkw.wave(constraints)
+    def transpose(
+        a: tkl.Memory[M, N, GLOBAL_ADDRESS_SPACE, tkl.f32],
+        a_transpose: tkl.Memory[N, M, GLOBAL_ADDRESS_SPACE, tkl.f32],
+    ):
+        a_reg = tkw.read(a, elements_per_thread=dim_size)
+        a_transpose_reg = tkw.permute(a_reg, [N, M])
+        tkw.write(a_transpose_reg, a_transpose, elements_per_thread=dim_size)
+
+    hyperparams = {
+        BLOCK_M: dim_size,
+        BLOCK_N: dim_size,
+        M: dim_size,
+        N: dim_size,
+    }
+
+    return transpose, hyperparams
+
+
+def testTranspose():
+    torch.manual_seed(0)
+    a = torch.arange(256, device=get_default_device(), dtype=torch.float32).reshape(
+        16, 16
+    )
+
+    transpose, hyperparams = get_transpose_kernel(dim_size=16)
+    hyperparams.update(get_default_scheduling_params())
+
+    options = WaveCompileOptions(
+        subs=hyperparams,
+        waves_per_eu=2,
+        denorm_fp_math_f32="preserve-sign",
+        canonicalize=True,
+    )
+    options = set_default_run_config(options)
+    transpose = wave_compile(options, transpose)
+
+    a_transpose = torch.zeros_like(a)
+    asm = transpose(a, a_transpose)
+
+    asm_path = pathlib.Path(f"wave_transpose_16x16.mlir")
+
+    if dump_generated_mlir:
+        filepath = "out" / asm_path
+        filepath.write_text(asm)
+        print(f"IR dumped to {filepath}")
+
+    assert_close(a_transpose, a.transpose(-1, -2))
