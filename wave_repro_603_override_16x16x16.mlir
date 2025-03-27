@@ -57,13 +57,14 @@ module attributes {transform.with_named_sequence} {
 
         %a_t_reg_ext = arith.constant dense<0.000000e+00> : vector<4xf32>
 
-        // unrolled loop
+        // constant for the thread
         %x_div_ept = arith.divsi %thread_id_x, %els_per_thread : index // (x // els_per_thread)
         %x_div_ept_times_16 = arith.muli %x_div_ept, %c16 : index // (x // els_per_thread) * 16
         %x_div_16 = arith.divsi %thread_id_x, %c16 : index        // (x // 16)
         %x_div_16_times_ept = arith.muli %els_per_thread, %x_div_16 : index  // els_per_thread * (x // 16)
         %x_plus_ept = arith.addi %thread_id_x, %els_per_thread : index
 
+        // unrolled loop
         // shuff_i = 0
         %shuff0 = arith.constant 0 : index
         %x_plus_shuff0 = arith.addi %thread_id_x, %shuff0 : index  // x + shuff0
@@ -84,22 +85,24 @@ module attributes {transform.with_named_sequence} {
         %a_t_reg0_ext = vector.insert %get0, %a_t_reg_ext[%dest0_idx] : f32 into vector<4xf32>
 
         // shuff_i = 1
-        // %shuff1 = arith.constant 1 : index
-        // %x_plus_shuff1 = arith.addi %thread_id_x, %shuff1 : index
-        // %dest1_idx = arith.remsi %x_plus_shuff1, %els_per_thread : index
-        // %tmp1_0 = arith.addi %x_mod_4_times_16, %dest1_idx : index
-        // %tmp1_1 = arith.remsi %tmp1_0, %wave_size : index
-        // %src_thread1_idx = arith.addi %tmp1_1, %x_div_16_mod_4 : index
-        // %src_thread1_i32 = arith.index_cast %src_thread1_idx : index to i32
+        %shuff1 = arith.constant 1 : index
+        %x_plus_shuff1 = arith.addi %thread_id_x, %shuff1 : index
+        %dest1_idx = arith.remsi %x_plus_shuff1, %els_per_thread : index
 
-        // %tmp1_2 = arith.subi %x_plus_ept, %shuff1 : index
-        // %offer1_idx = arith.remsi %tmp1_2, %els_per_thread : index
-        // %offer1 = vector.extract %a_reg_ext[%offer1_idx] : f32 from vector<4xf32>
+        %tmp1_0 = arith.addi %x_div_ept_times_16, %dest1_idx : index
+        %tmp1_1 = arith.remsi %tmp1_0, %wave_size : index
+        %src_thread1_idx = arith.addi %tmp1_1, %x_div_16_times_ept : index
+        %src_thread1_i32 = arith.index_cast %src_thread1_idx : index to i32
 
-        // %get1, %valid1 = gpu.shuffle idx %offer1, %src_thread1_i32, %wave_size_i32 : f32
-        // %a_t_reg1_ext = vector.insert %get1, %a_t_reg0_ext[%dest1_idx] : f32 into vector<4xf32>
+        %tmp1_2 = arith.subi %x_plus_ept, %shuff1 : index
+        %offer1_idx = arith.remsi %tmp1_2, %els_per_thread : index
+        %offer1 = vector.extract %a_reg_ext[%offer1_idx] : f32 from vector<4xf32>
 
-        %a_t_reg = arith.truncf %a_t_reg0_ext : vector<4xf32> to vector<4xf16>
+        %get1, %valid1 = gpu.shuffle idx %offer1, %src_thread1_i32, %wave_size_i32 : f32
+        %a_t_reg1_ext = vector.insert %get1, %a_t_reg0_ext[%dest1_idx] : f32 into vector<4xf32>
+
+
+        %a_t_reg = arith.truncf %a_t_reg1_ext : vector<4xf32> to vector<4xf16>
 
         vector.store %a_t_reg, %a_transpose[%2, %8] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<4xf16>
         %24 = amdgpu.mfma %e_reg * %a_reg + %c0_4vf32 {blocks = 1 : i32, k = 16 : i32, m = 16 : i32, n = 16 : i32} blgp =  none : vector<4xf16>, vector<4xf16>, vector<4xf32>
