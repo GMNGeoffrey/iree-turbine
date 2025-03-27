@@ -58,34 +58,50 @@ module attributes {transform.with_named_sequence} {
         %a_t_reg_ext = arith.constant dense<0.000000e+00> : vector<4xf32>
 
         // unrolled loop
-        %x_mod_4 = arith.divsi %thread_id_x, %els_per_thread : index
-        %x_mod_4_times_16 = arith.muli %x_mod_4, %c16 : index
-        %x_div_16 = arith.divsi %thread_id_x, %c16 : index
-        %x_div_16_mod_4 = arith.muli %x_div_16, %wave_size : index
-        %x_plus_4 = arith.addi %thread_id_x, %els_per_thread : index
+        %x_div_ept = arith.divsi %thread_id_x, %els_per_thread : index // (x // els_per_thread)
+        %x_div_ept_times_16 = arith.muli %x_div_ept, %c16 : index // (x // els_per_thread) * 16
+        %x_div_16 = arith.divsi %thread_id_x, %c16 : index        // (x // 16)
+        %x_div_16_times_ept = arith.muli %els_per_thread, %x_div_16 : index  // els_per_thread * (x // 16)
+        %x_plus_ept = arith.addi %thread_id_x, %els_per_thread : index
 
         // shuff_i = 0
         %shuff0 = arith.constant 0 : index
-        %x_plus_shuff0 = arith.addi %thread_id_x, %shuff0 : index
-        %dest0_idx = arith.remsi %x_plus_shuff0, %els_per_thread : index
-        %43 = arith.addi %x_mod_4_times_16, %dest0_idx : index
-        %44 = arith.remsi %43, %wave_size : index
-        %src_thread0_idx = arith.addi %44, %x_div_16_mod_4 : index
+        %x_plus_shuff0 = arith.addi %thread_id_x, %shuff0 : index  // x + shuff0
+        %dest0_idx = arith.remsi %x_plus_shuff0, %els_per_thread : index  // (x + shuff0) % els_per_thread
 
+        // ((x // els_per_thread) * 16 + dest_i) % threads_per_wave + els_per_thread * (x // 16)
+        %tmp0_0 = arith.addi %x_div_ept_times_16, %dest0_idx : index // (x // els_per_thread) * 16 + dest_i
+        %tmp0_1 = arith.remsi %tmp0_0, %wave_size : index            // ((x // els_per_thread) * 16 + dest_i) % threads_per_wave
+        %src_thread0_idx = arith.addi %tmp0_1, %x_div_16_times_ept : index
         %src_thread0_i32 = arith.index_cast %src_thread0_idx : index to i32
 
-        %51 = arith.subi %x_plus_4, %shuff0 : index
-        %offer0_idx = arith.remsi %51, %els_per_thread : index
-
+        // (x + els_per_thread - shuff_i) % els_per_thread
+        %tmp0_2 = arith.subi %x_plus_ept, %shuff0 : index
+        %offer0_idx = arith.remsi %tmp0_2, %els_per_thread : index
         %offer0 = vector.extract %a_reg_ext[%offer0_idx] : f32 from vector<4xf32>
 
         %get0, %valid0 = gpu.shuffle idx %offer0, %src_thread0_i32, %wave_size_i32 : f32
-
         %a_t_reg0_ext = vector.insert %get0, %a_t_reg_ext[%dest0_idx] : f32 into vector<4xf32>
+
+        // shuff_i = 1
+        // %shuff1 = arith.constant 1 : index
+        // %x_plus_shuff1 = arith.addi %thread_id_x, %shuff1 : index
+        // %dest1_idx = arith.remsi %x_plus_shuff1, %els_per_thread : index
+        // %tmp1_0 = arith.addi %x_mod_4_times_16, %dest1_idx : index
+        // %tmp1_1 = arith.remsi %tmp1_0, %wave_size : index
+        // %src_thread1_idx = arith.addi %tmp1_1, %x_div_16_mod_4 : index
+        // %src_thread1_i32 = arith.index_cast %src_thread1_idx : index to i32
+
+        // %tmp1_2 = arith.subi %x_plus_ept, %shuff1 : index
+        // %offer1_idx = arith.remsi %tmp1_2, %els_per_thread : index
+        // %offer1 = vector.extract %a_reg_ext[%offer1_idx] : f32 from vector<4xf32>
+
+        // %get1, %valid1 = gpu.shuffle idx %offer1, %src_thread1_i32, %wave_size_i32 : f32
+        // %a_t_reg1_ext = vector.insert %get1, %a_t_reg0_ext[%dest1_idx] : f32 into vector<4xf32>
 
         %a_t_reg = arith.truncf %a_t_reg0_ext : vector<4xf32> to vector<4xf16>
 
-        vector.store %a_t_reg, %a_transpose[%8, %2] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<4xf16>
+        vector.store %a_t_reg, %a_transpose[%2, %8] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<4xf16>
         %24 = amdgpu.mfma %e_reg * %a_reg + %c0_4vf32 {blocks = 1 : i32, k = 16 : i32, m = 16 : i32, n = 16 : i32} blgp =  none : vector<4xf16>, vector<4xf16>, vector<4xf32>
         %25 = arith.truncf %24 : vector<4xf32> to vector<4xf16>
         %26 = vector.extract_strided_slice %25 {offsets = [0], sizes = [1], strides = [1]} : vector<4xf16> to vector<1xf16>
