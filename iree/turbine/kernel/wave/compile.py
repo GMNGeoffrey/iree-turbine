@@ -36,6 +36,7 @@ class WaveKernel:
         kernel_inputs = []
         kernel_outputs = []
         for arg, usage in zip(args, self.options.kernel_usages):
+            assert arg.is_contiguous(), "Tensor arguments must be contiguous"
             if usage == kernel_codegen.KernelBufferUsage.INPUT:
                 kernel_inputs.append(arg)
 
