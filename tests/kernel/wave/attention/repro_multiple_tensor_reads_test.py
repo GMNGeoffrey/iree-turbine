@@ -335,7 +335,7 @@ def testRepro603(mfma_variant: MMAType, shape: tuple[int, ...], read_twice: bool
     repro_603(a, b, e, a_transpose, c, d)
 
     assert_close(c, c_ref, **cmp_params)
-    print(small_tensor_string(a, "a", precision=0, sci_mode=False))
+    # print(small_tensor_string(a, "a", precision=0, sci_mode=False))
     assert_close(a_transpose, a.transpose(-1, -2), atol=0, rtol=0)
     assert_close(d, d_ref, **cmp_params)
 
@@ -392,9 +392,9 @@ def testOverrideAsm(mfma_variant: MMAType, shape: tuple[int, ...]):
     a_transpose = device_zeros(dim_n, dim_k, dtype=torch.float16)
     repro_603(a, b, e, a_transpose, c, d)
 
+    assert_close(a_transpose, a.transpose(-1, -2), atol=0, rtol=0)
     assert_close(c, c_ref, **cmp_params)
     # print(small_tensor_string(a, "a", precision=0, sci_mode=False))
-    assert_close(a_transpose, a.transpose(-1, -2), atol=0, rtol=0)
     assert_close(d, d_ref, **cmp_params)
 
 
