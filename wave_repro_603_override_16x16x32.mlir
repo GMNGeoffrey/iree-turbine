@@ -141,9 +141,10 @@ module attributes {transform.with_named_sequence} {
           %a_t_reg3_ext = vector.insert %get3, %a_t_reg2_ext[%dest3_idx] : f32 into vector<4xf32>
 
           %a_t_reg = arith.truncf %a_t_reg3_ext : vector<4xf32> to vector<4xf16>
+          %k_idx = arith.addi %8, %46 : index
           // End GPU Shuffle
-          vector.store %a_t_reg, %a_transpose[%47, %8] : memref<16x32xf16, strided<[32, 1], offset: ?>>, vector<4xf16>
-          %59 = amdgpu.mfma %e_reg * %a_reg + %arg7 {blocks = 1 : i32, k = 16 : i32, m = 16 : i32, n = 16 : i32} blgp =  none : vector<4xf16>, vector<4xf16>, vector<4xf32>
+          vector.store %a_t_reg, %a_transpose[%2, %k_idx] : memref<16x32xf16, strided<[32, 1], offset: ?>>, vector<4xf16>
+          %59 = amdgpu.mfma %e_reg * %a_t_reg + %arg7 {blocks = 1 : i32, k = 16 : i32, m = 16 : i32, n = 16 : i32} blgp =  none : vector<4xf16>, vector<4xf16>, vector<4xf32>
           scf.yield %59 : vector<4xf32>
         }
         %35 = arith.truncf %34 : vector<4xf32> to vector<4xf16>
