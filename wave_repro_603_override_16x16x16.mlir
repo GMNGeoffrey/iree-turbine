@@ -64,7 +64,7 @@ module attributes {transform.with_named_sequence} {
         %x_div_16_times_ept = arith.muli %els_per_thread, %x_div_16 : index  // els_per_thread * (x // 16)
         %x_plus_ept = arith.addi %thread_id_x, %els_per_thread : index
 
-        // unrolled loop
+        // unrolled loop (4)
         // shuff_i = 0
         %shuff0 = arith.constant 0 : index
         %x_plus_shuff0 = arith.addi %thread_id_x, %shuff0 : index  // x + shuff0
@@ -138,7 +138,7 @@ module attributes {transform.with_named_sequence} {
         %a_t_reg = arith.truncf %a_t_reg3_ext : vector<4xf32> to vector<4xf16>
 
         vector.store %a_t_reg, %a_transpose[%2, %8] : memref<16x16xf16, strided<[16, 1], offset: ?>>, vector<4xf16>
-        %24 = amdgpu.mfma %e_reg * %a_reg + %c0_4vf32 {blocks = 1 : i32, k = 16 : i32, m = 16 : i32, n = 16 : i32} blgp =  none : vector<4xf16>, vector<4xf16>, vector<4xf32>
+        %24 = amdgpu.mfma %e_reg * %a_t_reg + %c0_4vf32 {blocks = 1 : i32, k = 16 : i32, m = 16 : i32, n = 16 : i32} blgp =  none : vector<4xf16>, vector<4xf16>, vector<4xf32>
         %25 = arith.truncf %24 : vector<4xf32> to vector<4xf16>
         %26 = vector.extract_strided_slice %25 {offsets = [0], sizes = [1], strides = [1]} : vector<4xf16> to vector<1xf16>
         %d = stream.binding.subspan %arg_d[%c0] : !stream.binding -> memref<16x16xf16, strided<[16, 1], offset: ?>>
