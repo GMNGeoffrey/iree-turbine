@@ -81,10 +81,16 @@ def prettify_mlir(asm: str, options: WaveCompileOptions):
 
             loads = re.findall(rf"%(\d+) = vector.load %{b.name}\b", asm)
 
-            for i, load_ssa in enumerate(loads):
+            if len(loads) == 1:
+                load_ssa = loads[0]
                 find = rf"%{load_ssa}\b"
-                replace = f"%{b.name}_reg_{i}"
+                replace = f"%{b.name}_reg"
                 asm = re.sub(find, replace, asm)
+            else:
+                for i, load_ssa in enumerate(loads):
+                    find = rf"%{load_ssa}\b"
+                    replace = f"%{b.name}_reg_{i}"
+                    asm = re.sub(find, replace, asm)
 
     # Sub floats
     log2e_matches = re.findall(
@@ -135,11 +141,15 @@ def small_tensor_string(
     # Things large enough that we can't round them off to zero and small enough
     # that we need scientific notation to print them or if anything's big enough
     # that we need scientific notation.
-    sci_mode = sci_mode or (
-        torch.any(torch.logical_and(abs > min_important_value, abs < 1e-3))
-        or torch.max(abs) > 1e3
+    sci_mode = (
+        sci_mode
+        if sci_mode is not None
+        else (
+            torch.any(torch.logical_and(abs > min_important_value, abs < 1e-3))
+            or torch.max(abs) > 1e3
+        )
     )
-    precision = precision or 2 if sci_mode else 3
+    precision = precision if precision is not None else (2 if sci_mode else 3)
 
     def fallback():
         with torch._tensor_str.printoptions(
@@ -285,12 +295,9 @@ def testRepro603(mfma_variant: MMAType, shape: tuple[int, ...], read_twice: bool
 
     # a = device_randn(dim_k, dim_n, dtype=torch.float16) / 10
     # a = make_tensor(dim_k, dim_n, dtype=torch.float16, device=get_default_device(), low=0.001, high=0.1)
-    a = (
-        torch.arange(
-            0, 256, 1, device=get_default_device(), dtype=torch.float16
-        ).reshape(16, 16)
-        / 100
-    )
+    a = torch.arange(
+        0, 256, 1, device=get_default_device(), dtype=torch.float16
+    ).reshape(16, 16)
     b = device_randn(dim_m, dim_n, dtype=torch.float16) / 10
     e = device_randn(dim_m, dim_k, dtype=torch.float16) / 10
 
@@ -328,26 +335,32 @@ def testRepro603(mfma_variant: MMAType, shape: tuple[int, ...], read_twice: bool
     repro_603(a, b, e, a_transpose, c, d)
 
     assert_close(c, c_ref, **cmp_params)
-    print(small_tensor_string(a, "a"))
+    print(small_tensor_string(a, "a", precision=0, sci_mode=False))
     assert_close(a_transpose, a.transpose(-1, -2), atol=0, rtol=0)
     assert_close(d, d_ref, **cmp_params)
 
 
 @require_e2e
-@param_mfma_shape
-def testOverrideAsm(mfma_variant: MMAType, shape: tuple[int, ...]):
+def testOverrideAsm():
+    mfma_variant = MMAType.F32_16x16x16_F16
+    shape = 16, 16, 16
+
     torch.manual_seed(0)
     dim_m, dim_n, dim_k = shape
     cmp_params = dict(atol=3e-3, rtol=3e-3, check_dtype=False)
 
     # a = device_randn(dim_k, dim_n, dtype=torch.float16) / 10
-    a = device_zeros(dim_k, dim_n, dtype=torch.float16)
-    a[:4, :4] = torch.arange(16, dtype=torch.float16).reshape(4, 4)
+    # a = device_zeros(dim_k, dim_n, dtype=torch.float16)
+    # a[:4, :4] = torch.arange(16, dtype=torch.float16).reshape(4, 4)
+
+    a = torch.arange(
+        0, 256, 1, device=get_default_device(), dtype=torch.float16
+    ).reshape(16, 16)
 
     b = device_randn(dim_m, dim_n, dtype=torch.float16) / 10
-    # e = device_randn(dim_m, dim_k, dtype=torch.float16) / 10
-    e = device_zeros(dim_m, dim_k, dtype=torch.float16)
-    e[:4, :4] = torch.arange(16, 32, dtype=torch.float16).reshape(4, 4)
+    e = device_randn(dim_m, dim_k, dtype=torch.float16) / 10
+    # e = device_zeros(dim_m, dim_k, dtype=torch.float16)
+    # e[:4, :4] = torch.arange(16, 32, dtype=torch.float16).reshape(4, 4)
 
     c_ref = torch.matmul(a, b.transpose(-1, -2))
     d_ref = torch.matmul(e, a)
@@ -376,20 +389,19 @@ def testOverrideAsm(mfma_variant: MMAType, shape: tuple[int, ...]):
     options = set_default_run_config(options)
     repro_603 = wave_compile(options, repro_603)
 
-    c = device_zeros(dim_k, dim_m, dtype=torch.float32)
-    d = torch.zeros_like(b)
-
-    asm = repro_603(a, b, e, c, d)
-
     if dump_generated_mlir:
         filepath = "out" / asm_path
         filepath.write_text(asm)
         print(f"IR dumped to {filepath}")
 
+    c = device_zeros(dim_k, dim_m, dtype=torch.float32)
+    d = torch.zeros_like(b)
+    a_transpose = device_zeros(dim_n, dim_k, dtype=torch.float16)
+    repro_603(a, b, e, a_transpose, c, d)
+
     assert_close(c, c_ref, **cmp_params)
-    print(small_tensor_string(e, "e"))
-    print(small_tensor_string(a, "a"))
-    # assert not torch.allclose(d, bad_d_ref, atol=3e-3, rtol=3e-3)
+    print(small_tensor_string(a, "a", precision=0, sci_mode=False))
+    assert_close(a_transpose, a.transpose(-1, -2), atol=0, rtol=0)
     assert_close(d, d_ref, **cmp_params)
 
 
@@ -408,7 +420,6 @@ def get_transpose_kernel(dim_size: int):
             threads_per_wave=64,
             waves_per_block=(1, 1, 1),
             vector_shapes={M: dim_size, N: dim_size},
-            # max_bits_per_load=512,
         ),
     ]
 
@@ -461,5 +472,6 @@ def testTranspose():
     # Wave makes unfortunate assumptions about things being contiguous
     a_transpose_ref = a.transpose(-1, -2).contiguous()
     a_transpose = torch.zeros_like(a_transpose_ref)
+    print(small_tensor_string(a, "a", precision=0, sci_mode=False))
     transpose(a, a_transpose)
     assert_close(a_transpose, a_transpose_ref)
