@@ -66,6 +66,113 @@ param_mfma_shape = pytest.mark.parametrize(
 )
 
 
+def prettify_mlir(asm: str, options: WaveCompileOptions):
+    # Sub arguments
+    for i, b in enumerate(options.kernel_sig.kernel_buffer_bindings):
+        if b.name:
+            asm = re.sub(rf"%arg{i}\b", f"%arg_{b.name}", asm)
+            arg_access = re.findall(
+                rf"%(\d+) = stream.binding.subspan %arg_{b.name}\[%c0\]", asm
+            )
+            if len(arg_access) > 1:
+                raise RuntimeError(f"Found more than one access of binding {b.name}")
+            if arg_access:
+                asm = re.sub(rf"%{arg_access[0]}\b", f"%{b.name}", asm)
+
+            loads = re.findall(rf"%(\d+) = vector.load %{b.name}\b", asm)
+
+            for i, load_ssa in enumerate(loads):
+                find = rf"%{load_ssa}\b"
+                replace = f"%{b.name}_reg_{i}"
+                asm = re.sub(find, replace, asm)
+
+    # Sub floats
+    log2e_matches = re.findall(
+        r"%(\w+) = arith\.constant dense<1\.44269502(?:e\+00)?> : vector<(\d+)x(f\d+)>",
+        asm,
+    )
+    for m in log2e_matches:
+        ssa, v_size, dtype = m
+        asm = re.sub(rf"%{ssa}\b", f"%log2e_{v_size}v{dtype}", asm)
+
+    zero_matches = re.findall(
+        r"%(\w+) = arith\.constant dense<0\.0*(?:e\+00)?> : vector<(\d+)x(f\d+)>",
+        asm,
+    )
+    for m in zero_matches:
+        ssa, v_size, dtype = m
+        asm = re.sub(rf"%{ssa}\b", f"%c0_{v_size}v{dtype}", asm)
+
+    neg_inf_matches = re.findall(
+        r"%(\w+) = arith\.constant dense<-1\.0*e\+06> : vector<(\d+)x(f\d+)>",
+        asm,
+    )
+    for m in neg_inf_matches:
+        ssa, v_size, dtype = m
+        asm = re.sub(rf"%{ssa}\b", f"%c_minf_{v_size}v{dtype}", asm)
+
+    return asm
+
+
+def small_tensor_string(
+    t,
+    name="",
+    row_limit=50,
+    col_limit=150,
+    min_important_value=1e-5,
+    sci_mode=None,
+    precision=None,
+):
+    # Unfortunately, pytest usually captures the output and so we can't access the real width here :-(
+    # col_limit = col_limit or shutil.get_terminal_size().columns
+    shape = "x".join([str(i) for i in t.shape])
+    if len(t.shape) > 2:
+        t = t.squeeze()
+    if len(t.shape) < 2:
+        t = t.unsqueeze(0)
+
+    abs = torch.abs(t)
+    # Things large enough that we can't round them off to zero and small enough
+    # that we need scientific notation to print them or if anything's big enough
+    # that we need scientific notation.
+    sci_mode = sci_mode or (
+        torch.any(torch.logical_and(abs > min_important_value, abs < 1e-3))
+        or torch.max(abs) > 1e3
+    )
+    precision = precision or 2 if sci_mode else 3
+
+    def fallback():
+        with torch._tensor_str.printoptions(
+            precision=2 if sci_mode else 3,
+            linewidth=col_limit,
+            sci_mode=sci_mode,
+            threshold=0,
+        ):
+            return f"{name}[{shape}], {t.dtype}:\n{t}"
+
+    if len(t.shape) > 2 or t.shape[0] > row_limit:
+        return fallback()
+
+    def f_entry(d, width=0):
+        return (
+            f"{d: {width}.{precision}e}" if sci_mode else f"{d: {width}.{precision}f}"
+        )
+
+    width = max(len(f_entry(d)) for d in t.flatten().tolist())
+
+    row_width = len(" ".join(f_entry(d, width) for d in t[0].tolist()))
+
+    if row_width > col_limit:
+        return fallback()
+
+    rows = []
+    for row in t:
+        rows.append(" ".join(f_entry(d, width) for d in row.tolist()))
+
+    nl = "\n"
+    return f"{name}[{shape}], {t.dtype}:\n{nl.join(rows)}"
+
+
 def get_repro_603_kernel(
     dim_m: int,
     dim_n: int,
@@ -226,65 +333,6 @@ def testRepro603(mfma_variant: MMAType, shape: tuple[int, ...], read_twice: bool
     assert_close(d, d_ref, **cmp_params)
 
 
-def small_tensor_string(
-    t,
-    name="",
-    row_limit=50,
-    col_limit=150,
-    min_important_value=1e-5,
-    sci_mode=None,
-    precision=None,
-):
-    # Unfortunately, pytest usually captures the output and so we can't access the real width here :-(
-    # col_limit = col_limit or shutil.get_terminal_size().columns
-    shape = "x".join([str(i) for i in t.shape])
-    if len(t.shape) > 2:
-        t = t.squeeze()
-    if len(t.shape) < 2:
-        t = t.unsqueeze(0)
-
-    abs = torch.abs(t)
-    # Things large enough that we can't round them off to zero and small enough
-    # that we need scientific notation to print them or if anything's big enough
-    # that we need scientific notation.
-    sci_mode = sci_mode or (
-        torch.any(torch.logical_and(abs > min_important_value, abs < 1e-3))
-        or torch.max(abs) > 1e3
-    )
-    precision = precision or 2 if sci_mode else 3
-
-    def fallback():
-        with torch._tensor_str.printoptions(
-            precision=2 if sci_mode else 3,
-            linewidth=col_limit,
-            sci_mode=sci_mode,
-            threshold=0,
-        ):
-            return f"{name}[{shape}], {t.dtype}:\n{t}"
-
-    if len(t.shape) > 2 or t.shape[0] > row_limit:
-        return fallback()
-
-    def f_entry(d, width=0):
-        return (
-            f"{d: {width}.{precision}e}" if sci_mode else f"{d: {width}.{precision}f}"
-        )
-
-    width = max(len(f_entry(d)) for d in t.flatten().tolist())
-
-    row_width = len(" ".join(f_entry(d, width) for d in t[0].tolist()))
-
-    if row_width > col_limit:
-        return fallback()
-
-    rows = []
-    for row in t:
-        rows.append(" ".join(f_entry(d, width) for d in row.tolist()))
-
-    nl = "\n"
-    return f"{name}[{shape}], {t.dtype}:\n{nl.join(rows)}"
-
-
 @require_e2e
 @param_mfma_shape
 def testOverrideAsm(mfma_variant: MMAType, shape: tuple[int, ...]):
@@ -346,6 +394,7 @@ def testOverrideAsm(mfma_variant: MMAType, shape: tuple[int, ...]):
 
 
 def get_transpose_kernel(dim_size: int):
+    elements_per_thread = 4
     M = tkl.sym.M
     N = tkl.sym.N
 
@@ -359,7 +408,7 @@ def get_transpose_kernel(dim_size: int):
             threads_per_wave=64,
             waves_per_block=(1, 1, 1),
             vector_shapes={M: dim_size, N: dim_size},
-            max_bits_per_load=512,
+            # max_bits_per_load=512,
         ),
     ]
 
@@ -368,9 +417,9 @@ def get_transpose_kernel(dim_size: int):
         a: tkl.Memory[M, N, GLOBAL_ADDRESS_SPACE, tkl.f32],
         a_transpose: tkl.Memory[N, M, GLOBAL_ADDRESS_SPACE, tkl.f32],
     ):
-        a_reg = tkw.read(a, elements_per_thread=dim_size)
+        a_reg = tkw.read(a, elements_per_thread=elements_per_thread)
         a_transpose_reg = tkw.permute(a_reg, [N, M])
-        tkw.write(a_transpose_reg, a_transpose, elements_per_thread=dim_size)
+        tkw.write(a_transpose_reg, a_transpose, elements_per_thread=elements_per_thread)
 
     hyperparams = {
         BLOCK_M: dim_size,
@@ -380,54 +429,6 @@ def get_transpose_kernel(dim_size: int):
     }
 
     return transpose, hyperparams
-
-
-def prettify_mlir(asm: str, options: WaveCompileOptions):
-    # Sub arguments
-    for i, b in enumerate(options.kernel_sig.kernel_buffer_bindings):
-        if b.name:
-            asm = re.sub(rf"%arg{i}\b", f"%arg_{b.name}", asm)
-            arg_access = re.findall(
-                rf"%(\d+) = stream.binding.subspan %arg_{b.name}\[%c0\]", asm
-            )
-            if len(arg_access) > 1:
-                raise RuntimeError(f"Found more than one access of binding {b.name}")
-            if arg_access:
-                asm = re.sub(rf"%{arg_access[0]}\b", f"%{b.name}", asm)
-
-            loads = re.findall(rf"%(\d+) = vector.load %{b.name}\b", asm)
-
-            for i, load_ssa in enumerate(loads):
-                find = rf"%{load_ssa}\b"
-                replace = f"%{b.name}_reg_{i}"
-                asm = re.sub(find, replace, asm)
-
-    # Sub floats
-    log2e_matches = re.findall(
-        r"%(\w+) = arith\.constant dense<1\.44269502(?:e\+00)?> : vector<(\d+)x(f\d+)>",
-        asm,
-    )
-    for m in log2e_matches:
-        ssa, v_size, dtype = m
-        asm = re.sub(rf"%{ssa}\b", f"%log2e_{v_size}v{dtype}", asm)
-
-    zero_matches = re.findall(
-        r"%(\w+) = arith\.constant dense<0\.0*(?:e\+00)?> : vector<(\d+)x(f\d+)>",
-        asm,
-    )
-    for m in zero_matches:
-        ssa, v_size, dtype = m
-        asm = re.sub(rf"%{ssa}\b", f"%c0_{v_size}v{dtype}", asm)
-
-    neg_inf_matches = re.findall(
-        r"%(\w+) = arith\.constant dense<-1\.0*e\+06> : vector<(\d+)x(f\d+)>",
-        asm,
-    )
-    for m in neg_inf_matches:
-        ssa, v_size, dtype = m
-        asm = re.sub(rf"%{ssa}\b", f"%c_minf_{v_size}v{dtype}", asm)
-
-    return asm
 
 
 def testTranspose():
@@ -457,8 +458,8 @@ def testTranspose():
         filepath.write_text(asm)
         print(f"IR dumped to {filepath}")
 
-    a_transpose_ref = a.transpose(-1, -2)
-
+    # Wave makes unfortunate assumptions about things being contiguous
+    a_transpose_ref = a.transpose(-1, -2).contiguous()
     a_transpose = torch.zeros_like(a_transpose_ref)
     transpose(a, a_transpose)
     assert_close(a_transpose, a_transpose_ref)
