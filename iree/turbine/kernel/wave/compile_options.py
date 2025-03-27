@@ -3,7 +3,7 @@ from typing import Any
 from .scheduling.schedule_enums import SchedulingType
 from .._support.indexing import IndexExpr
 from .utils.classes import KernelLaunchInfo
-from ..compiler.kernel_codegen import KernelBufferUsage
+from ..compiler.kernel_codegen import KernelBufferUsage, KernelSignature
 
 
 @dataclass
@@ -26,6 +26,7 @@ class WaveCompileOptions:
     use_scheduling_barriers: bool = False
 
     # === Runtime options ===
+    kernel_sig: KernelSignature = None
     kernel_launch_info: KernelLaunchInfo = field(default_factory=KernelLaunchInfo)
     kernel_usages: tuple[KernelBufferUsage] = None
     inplace: bool = True

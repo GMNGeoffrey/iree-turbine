@@ -6,9 +6,12 @@
 
 
 import pathlib
+import re
+
 import pytest
 import torch
-from torch.nn import functional as F
+from torch.testing import assert_close, make_tensor
+
 import iree.turbine.kernel as tk
 import iree.turbine.kernel.lang as tkl
 import iree.turbine.kernel.wave as tkw
@@ -35,7 +38,6 @@ from ..common.utils import (
     dump_generated_mlir,
     param_bool,
 )
-from torch.testing import assert_close
 
 # m, n, k
 shapes_16x16x16 = [
@@ -77,6 +79,7 @@ def get_repro_603_kernel(
 
     BLOCK_K = tkl.sym.BLOCK_K
     BLOCK_M = tkl.sym.BLOCK_M
+    BLOCK_N = tkl.sym.BLOCK_N
     MFMA_INPUT_ELS_PER_THREAD = tkl.sym.MFMA_INPUT_ELS_PER_THREAD
     MFMA_OUTPUT_ELS_PER_THREAD = tkl.sym.MFMA_OUTPUT_ELS_PER_THREAD
 
@@ -87,6 +90,7 @@ def get_repro_603_kernel(
 
     constraints: list[tkw.Constraint] = [
         tkw.WorkgroupConstraint(M, BLOCK_M, 0),
+        tkw.WorkgroupConstraint(N, BLOCK_N, 1),
         tkw.TilingConstraint(K, BLOCK_K),
         tkw.HardwareConstraint(
             threads_per_wave=64,
@@ -109,6 +113,7 @@ def get_repro_603_kernel(
         a: tkl.Memory[K, N, GLOBAL_ADDRESS_SPACE, tkl.f16],
         b: tkl.Memory[M, N, GLOBAL_ADDRESS_SPACE, tkl.f16],
         e: tkl.Memory[M, K, GLOBAL_ADDRESS_SPACE, tkl.f16],
+        a_transpose: tkl.Memory[N, K, GLOBAL_ADDRESS_SPACE, tkl.f16],
         c: tkl.Memory[K, M, GLOBAL_ADDRESS_SPACE, tkl.f32],
         d: tkl.Memory[M, N, GLOBAL_ADDRESS_SPACE, tkl.f16],
     ):
@@ -135,6 +140,9 @@ def get_repro_603_kernel(
                 )
             else:
                 a_reg_for_d = tkw.permute(a_reg_for_c, [N, K])
+            tkw.write(
+                a_reg_for_d, a_transpose, elements_per_thread=MFMA_INPUT_ELS_PER_THREAD
+            )
             d_acc = tkw.mma(e_reg, a_reg_for_d, d_acc)
 
             return d_acc
@@ -150,6 +158,7 @@ def get_repro_603_kernel(
         MFMA_OUTPUT_ELS_PER_THREAD: get_mfma_store_elems_per_thread(mfma_variant),
         BLOCK_K: vec_size,
         BLOCK_M: vec_size,
+        BLOCK_N: vec_size,
         M: dim_m,
         N: dim_n,
         K: dim_k,
@@ -167,7 +176,14 @@ def testRepro603(mfma_variant: MMAType, shape: tuple[int, ...], read_twice: bool
     dim_m, dim_n, dim_k = shape
     cmp_params = dict(atol=3e-3, rtol=3e-3, check_dtype=False)
 
-    a = device_randn(dim_k, dim_n, dtype=torch.float16) / 10
+    # a = device_randn(dim_k, dim_n, dtype=torch.float16) / 10
+    # a = make_tensor(dim_k, dim_n, dtype=torch.float16, device=get_default_device(), low=0.001, high=0.1)
+    a = (
+        torch.arange(
+            0, 256, 1, device=get_default_device(), dtype=torch.float16
+        ).reshape(16, 16)
+        / 100
+    )
     b = device_randn(dim_m, dim_n, dtype=torch.float16) / 10
     e = device_randn(dim_m, dim_k, dtype=torch.float16) / 10
 
@@ -191,10 +207,7 @@ def testRepro603(mfma_variant: MMAType, shape: tuple[int, ...], read_twice: bool
     options = set_default_run_config(options)
     repro_603 = wave_compile(options, repro_603)
 
-    c = device_zeros(dim_k, dim_m, dtype=torch.float32)
-    d = torch.zeros_like(b)
-
-    asm = repro_603(a, b, e, c, d)
+    asm = prettify_mlir(repro_603.asm, options)
 
     if dump_generated_mlir:
         filename = f"out/wave_repro_603_read_{'twice' if read_twice else 'once'}_{'x'.join(map(str, shape))}.mlir"
@@ -202,12 +215,25 @@ def testRepro603(mfma_variant: MMAType, shape: tuple[int, ...], read_twice: bool
             f.write(asm)
         print(f"IR dumped to {filename}")
 
+    c = device_zeros(dim_k, dim_m, dtype=torch.float32)
+    d = torch.zeros_like(b)
+    a_transpose = device_zeros(dim_n, dim_k, dtype=torch.float16)
+    repro_603(a, b, e, a_transpose, c, d)
+
     assert_close(c, c_ref, **cmp_params)
+    print(small_tensor_string(a, "a"))
+    assert_close(a_transpose, a.transpose(-1, -2), atol=0, rtol=0)
     assert_close(d, d_ref, **cmp_params)
 
 
 def small_tensor_string(
-    t, name="", row_limit=50, col_limit=150, min_important_value=1e-5
+    t,
+    name="",
+    row_limit=50,
+    col_limit=150,
+    min_important_value=1e-5,
+    sci_mode=None,
+    precision=None,
 ):
     # Unfortunately, pytest usually captures the output and so we can't access the real width here :-(
     # col_limit = col_limit or shutil.get_terminal_size().columns
@@ -221,11 +247,11 @@ def small_tensor_string(
     # Things large enough that we can't round them off to zero and small enough
     # that we need scientific notation to print them or if anything's big enough
     # that we need scientific notation.
-    sci_mode = (
+    sci_mode = sci_mode or (
         torch.any(torch.logical_and(abs > min_important_value, abs < 1e-3))
         or torch.max(abs) > 1e3
     )
-    sci_mode = False
+    precision = precision or 2 if sci_mode else 3
 
     def fallback():
         with torch._tensor_str.printoptions(
@@ -240,7 +266,9 @@ def small_tensor_string(
         return fallback()
 
     def f_entry(d, width=0):
-        return f"{d: {width}.2e}" if sci_mode else f"{d: {width}.0f}"
+        return (
+            f"{d: {width}.{precision}e}" if sci_mode else f"{d: {width}.{precision}f}"
+        )
 
     width = max(len(f_entry(d)) for d in t.flatten().tolist())
 
@@ -354,6 +382,54 @@ def get_transpose_kernel(dim_size: int):
     return transpose, hyperparams
 
 
+def prettify_mlir(asm: str, options: WaveCompileOptions):
+    # Sub arguments
+    for i, b in enumerate(options.kernel_sig.kernel_buffer_bindings):
+        if b.name:
+            asm = re.sub(rf"%arg{i}\b", f"%arg_{b.name}", asm)
+            arg_access = re.findall(
+                rf"%(\d+) = stream.binding.subspan %arg_{b.name}\[%c0\]", asm
+            )
+            if len(arg_access) > 1:
+                raise RuntimeError(f"Found more than one access of binding {b.name}")
+            if arg_access:
+                asm = re.sub(rf"%{arg_access[0]}\b", f"%{b.name}", asm)
+
+            loads = re.findall(rf"%(\d+) = vector.load %{b.name}\b", asm)
+
+            for i, load_ssa in enumerate(loads):
+                find = rf"%{load_ssa}\b"
+                replace = f"%{b.name}_reg_{i}"
+                asm = re.sub(find, replace, asm)
+
+    # Sub floats
+    log2e_matches = re.findall(
+        r"%(\w+) = arith\.constant dense<1\.44269502(?:e\+00)?> : vector<(\d+)x(f\d+)>",
+        asm,
+    )
+    for m in log2e_matches:
+        ssa, v_size, dtype = m
+        asm = re.sub(rf"%{ssa}\b", f"%log2e_{v_size}v{dtype}", asm)
+
+    zero_matches = re.findall(
+        r"%(\w+) = arith\.constant dense<0\.0*(?:e\+00)?> : vector<(\d+)x(f\d+)>",
+        asm,
+    )
+    for m in zero_matches:
+        ssa, v_size, dtype = m
+        asm = re.sub(rf"%{ssa}\b", f"%c0_{v_size}v{dtype}", asm)
+
+    neg_inf_matches = re.findall(
+        r"%(\w+) = arith\.constant dense<-1\.0*e\+06> : vector<(\d+)x(f\d+)>",
+        asm,
+    )
+    for m in neg_inf_matches:
+        ssa, v_size, dtype = m
+        asm = re.sub(rf"%{ssa}\b", f"%c_minf_{v_size}v{dtype}", asm)
+
+    return asm
+
+
 def testTranspose():
     torch.manual_seed(0)
     a = torch.arange(256, device=get_default_device(), dtype=torch.float32).reshape(
@@ -372,8 +448,7 @@ def testTranspose():
     options = set_default_run_config(options)
     transpose = wave_compile(options, transpose)
 
-    a_transpose = torch.zeros_like(a)
-    asm = transpose(a, a_transpose)
+    asm = prettify_mlir(transpose.asm, options)
 
     asm_path = pathlib.Path(f"wave_transpose_16x16.mlir")
 
@@ -382,4 +457,8 @@ def testTranspose():
         filepath.write_text(asm)
         print(f"IR dumped to {filepath}")
 
-    assert_close(a_transpose, a.transpose(-1, -2))
+    a_transpose_ref = a.transpose(-1, -2)
+
+    a_transpose = torch.zeros_like(a_transpose_ref)
+    transpose(a, a_transpose)
+    assert_close(a_transpose, a_transpose_ref)

@@ -113,7 +113,12 @@ class LaunchableThread(Launchable):
         kwargs,
         context: Optional[Context] = None,
         module_op: Optional[Operation] = None,
-    ):
+    ) -> tuple[
+        builder.ModuleBuilder,
+        dispatch_codegen.StreamExecutable,
+        kernel_codegen.KernelSignature,
+        str,
+    ]:
         # Trace the function.
         trace = self._trace()
         idxc = IndexingContext.current()
