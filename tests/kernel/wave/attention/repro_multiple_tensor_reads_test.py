@@ -468,3 +468,80 @@ def testTranspose():
     print(small_tensor_string(a, "a", precision=0, sci_mode=False))
     transpose(a, a_transpose)
     assert_close(a_transpose, a_transpose_ref)
+
+
+def get_copy1d_kernel(dim_n: int, block_n: int):
+    threads_per_wave = 64
+    elements_per_block = block_n
+    elements_per_thread = elements_per_block // threads_per_wave
+
+    N = tkl.sym.N
+
+    BLOCK_N = tkl.sym.BLOCK_N
+
+    constraints: list[tkw.Constraint] = [
+        tkw.WorkgroupConstraint(N, BLOCK_N, 0),
+        tkw.HardwareConstraint(
+            threads_per_wave=threads_per_wave,
+            waves_per_block=(1, 1, 1),
+            vector_shapes={N: block_n},
+        ),
+    ]
+
+    @tkw.wave(constraints)
+    def copy1d(
+        a: tkl.Memory[N, GLOBAL_ADDRESS_SPACE, tkl.i32],
+        b: tkl.Memory[N, GLOBAL_ADDRESS_SPACE, tkl.i32],
+    ):
+        a_reg = tkw.read(a, elements_per_thread=elements_per_thread)
+        tkw.write(a_reg, b, elements_per_thread=elements_per_thread)
+
+    hyperparams = {
+        BLOCK_N: block_n,
+        N: dim_n,
+    }
+
+    return copy1d, hyperparams
+
+
+@pytest.mark.parametrize(
+    "shape,block_size",
+    [
+        (64, 64),
+        (128, 64),
+        (128, 128),
+        (256, 64),
+        (256, 128),
+        (256, 256),
+    ],
+)
+def testCopy1D(shape: int, block_size: int):
+    torch.manual_seed(0)
+    dim_n = shape
+    block_n = block_size
+
+    a = torch.arange(dim_n, device=get_default_device(), dtype=torch.int32)
+
+    transpose, hyperparams = get_copy1d_kernel(dim_n, block_n)
+    hyperparams.update(get_default_scheduling_params())
+
+    asm_path = pathlib.Path(f"wave_copy1d_{shape}_{block_size}.mlir")
+
+    options = WaveCompileOptions(
+        subs=hyperparams,
+        waves_per_eu=2,
+        denorm_fp_math_f32="preserve-sign",
+        canonicalize=True,
+    )
+    options = set_default_run_config(options)
+    transpose = wave_compile(options, transpose)
+
+    if dump_generated_mlir:
+        asm = prettify_mlir(transpose.asm, options)
+        filepath = "out" / asm_path
+        filepath.write_text(asm)
+        print(f"IR dumped to {filepath}")
+
+    b = torch.zeros_like(a)
+    transpose(a, b)
+    assert_close(b, a)
