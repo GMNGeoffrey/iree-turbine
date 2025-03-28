@@ -7,6 +7,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
+import math
 from typing import Optional, Callable
 from sympy import ceiling, Piecewise, floor, Integer
 
@@ -114,6 +115,15 @@ class HardwareConstraint(Constraint):
             self.threads_per_block = (
                 self.waves_per_block[0] * self.threads_per_wave,
             ) + self.waves_per_block[1:]
+        total_threads_per_block = math.prod(self.threads_per_block)
+        total_waves_per_block = math.prod(self.waves_per_block)
+        expected_threads_per_block = self.threads_per_wave * total_waves_per_block
+        assert (
+            total_threads_per_block == self.threads_per_wave * total_waves_per_block
+        ), (
+            f"Invalid constraints: prod({self.threads_per_block}) = {total_threads_per_block} but must"
+            f" equal {self.threads_per_wave} * prod({self.waves_per_block}) = {expected_threads_per_block}"
+        )
 
     def max_elems_per_load(self, element_type: DataType) -> int:
         return self.max_bits_per_load // element_type.bitwidth()
@@ -127,7 +137,9 @@ class HardwareConstraint(Constraint):
             case 2:
                 return THREAD_2
             case _:
-                raise ValueError("Invalid workgroup dimension. Expected 0, 1 or 2.")
+                raise ValueError(
+                    f"Invalid workgroup dimension. Expected 0, 1 or 2. Got {workgroup_dim}"
+                )
 
     def mma_matrix_shapes(self, mma_type: Optional[MMAType]) -> tuple[int]:
         # TODO: Eventually the shapes and indices should be provided by a tool
@@ -491,12 +503,7 @@ class WaveConstraint(Constraint):
     (If the tensor dimension has been distributed along workgroup dimension
     {0, 1, 2}, then the corresponding thread id is {x, y, z}).
 
-    Because we represent the number of threads per block as
-    [wave_id_0 * threads_per_wave, wave_id_1, wave_id_2], special care is
-    required when computing wave_id_0. Specifically,
-    wave_id_0 = floor(thread_id_0 / threads_per_wave)
-    wave_id_1 = thread_id_1
-    wave_id_2 = thread_id_2
+    wave_id_i = thread_id_i // (threads_per_block[i] // waves_per_block[i])
     """
 
     dim: IndexExpr
@@ -513,19 +520,15 @@ class WaveConstraint(Constraint):
         hardware_constraint: HardwareConstraint,
         workgroup_constraint: WorkgroupConstraint,
     ):
-        """
-        The wave_id is the same as the thread_id, with the exception of
-          wave_id[0] = thread_id[0] / threads_per_wave
-        This is a convention that we adopt.
-        """
+        """The wave_id is the thread_id divided by the threads per wave in that dimension."""
         old_wave_id = self.wave_id
         assert self.dim == workgroup_constraint.dim, "Dimension mismatch"
-        self.wave_id = floor(
-            hardware_constraint.get_thread_id_from_workgroup_dim(
-                workgroup_constraint.workgroup_dim
-            )
-            / hardware_constraint.threads_per_block[workgroup_constraint.workgroup_dim]
-        )
+        dim_id = workgroup_constraint.workgroup_dim
+        thread_id = hardware_constraint.get_thread_id_from_workgroup_dim(dim_id)
+        threads_per_block = hardware_constraint.threads_per_block[dim_id]
+        waves_per_block = hardware_constraint.waves_per_block[dim_id]
+        threads_per_wave = threads_per_block // waves_per_block
+        self.wave_id = floor(thread_id / threads_per_wave)
         assert (
             old_wave_id is None or self.wave_id == old_wave_id
         ), f"Conflicting preset wave_id old: {old_wave_id} new: {self.wave_id}"
