@@ -9,6 +9,7 @@ import pathlib
 import re
 
 import pytest
+import sympy
 import torch
 from torch.testing import assert_close, make_tensor
 
@@ -51,9 +52,13 @@ shapes_16x16x16 = [
 shapes_32x32x32 = [tuple(2 * dim for dim in shape) for shape in shapes_16x16x16]
 
 
+def format_shape(shape: tuple[int, ...]):
+    return "x".join([str(dim) for dim in shape])
+
+
 def get_param_id(val):
     if isinstance(val, tuple) and all(isinstance(el, int) for el in val):
-        return "x".join(str(el) for el in val)
+        return format_shape(val)
     elif isinstance(val, MMAType):
         return f"MMA_{val.name}"
 
@@ -398,8 +403,11 @@ def testOverrideAsm(mfma_variant: MMAType, shape: tuple[int, ...]):
     assert_close(d, d_ref, **cmp_params)
 
 
-def get_transpose_kernel(dim_size: int):
-    elements_per_thread = 4
+def get_transpose_kernel(dim_m: int, dim_n: int, block_m: int, block_n: int):
+    threads_per_wave = 64
+    elements_per_block = block_m * block_n
+    elements_per_thread = elements_per_block // threads_per_wave
+
     M = tkl.sym.M
     N = tkl.sym.N
 
@@ -412,24 +420,24 @@ def get_transpose_kernel(dim_size: int):
         tkw.HardwareConstraint(
             threads_per_wave=64,
             waves_per_block=(1, 1, 1),
-            vector_shapes={M: dim_size, N: dim_size},
+            vector_shapes={M: block_m, N: block_n},
         ),
     ]
 
     @tkw.wave(constraints)
     def transpose(
-        a: tkl.Memory[M, N, GLOBAL_ADDRESS_SPACE, tkl.f32],
-        a_transpose: tkl.Memory[N, M, GLOBAL_ADDRESS_SPACE, tkl.f32],
+        a: tkl.Memory[M, N, GLOBAL_ADDRESS_SPACE, tkl.i32],
+        a_transpose: tkl.Memory[N, M, GLOBAL_ADDRESS_SPACE, tkl.i32],
     ):
         a_reg = tkw.read(a, elements_per_thread=elements_per_thread)
         a_transpose_reg = tkw.permute(a_reg, [N, M])
         tkw.write(a_transpose_reg, a_transpose, elements_per_thread=elements_per_thread)
 
     hyperparams = {
-        BLOCK_M: dim_size,
-        BLOCK_N: dim_size,
-        M: dim_size,
-        N: dim_size,
+        BLOCK_M: block_m,
+        BLOCK_N: block_n,
+        M: dim_m,
+        N: dim_n,
     }
 
     return transpose, hyperparams
@@ -437,27 +445,35 @@ def get_transpose_kernel(dim_size: int):
 
 def testTranspose():
     torch.manual_seed(0)
-    a = torch.arange(256, device=get_default_device(), dtype=torch.float32).reshape(
-        16, 16
-    )
+    dim_m, dim_n = 16, 16
+    block_m, block_n = 16, 16
+    override_mlir = True
 
-    transpose, hyperparams = get_transpose_kernel(dim_size=16)
+    a = torch.arange(
+        dim_m * dim_n, device=get_default_device(), dtype=torch.int32
+    ).reshape(dim_m, dim_n)
+
+    transpose, hyperparams = get_transpose_kernel(dim_m, dim_n, block_m, block_n)
     hyperparams.update(get_default_scheduling_params())
+
+    asm = None
+    asm_path = pathlib.Path(f"wave_transpose_16x16.mlir")
+    if override_mlir:
+        asm_path = asm_path.with_suffix(".override.mlir")
+        asm = asm_path.read_text()
 
     options = WaveCompileOptions(
         subs=hyperparams,
         waves_per_eu=2,
         denorm_fp_math_f32="preserve-sign",
         canonicalize=True,
+        override_mlir=asm,
     )
     options = set_default_run_config(options)
     transpose = wave_compile(options, transpose)
 
-    asm = prettify_mlir(transpose.asm, options)
-
-    asm_path = pathlib.Path(f"wave_transpose_16x16.mlir")
-
-    if dump_generated_mlir:
+    if not override_mlir and dump_generated_mlir:
+        asm = prettify_mlir(transpose.asm, options)
         filepath = "out" / asm_path
         filepath.write_text(asm)
         print(f"IR dumped to {filepath}")
@@ -465,9 +481,98 @@ def testTranspose():
     # Wave makes unfortunate assumptions about things being contiguous
     a_transpose_ref = a.transpose(-1, -2).contiguous()
     a_transpose = torch.zeros_like(a_transpose_ref)
-    print(small_tensor_string(a, "a", precision=0, sci_mode=False))
     transpose(a, a_transpose)
+    print(small_tensor_string(a, "a", precision=0, sci_mode=False))
     assert_close(a_transpose, a_transpose_ref)
+
+
+def get_copy2d_kernel(dim_m: int, dim_n: int, block_m: int, block_n: int):
+    threads_per_wave = 64
+    elements_per_block = block_m * block_n
+    assert elements_per_block >= threads_per_wave
+    elements_per_thread = elements_per_block // threads_per_wave
+
+    M = tkl.sym.M
+    N = tkl.sym.N
+
+    BLOCK_N = tkl.sym.BLOCK_N
+    BLOCK_M = tkl.sym.BLOCK_M
+
+    constraints: list[tkw.Constraint] = [
+        tkw.WorkgroupConstraint(M, BLOCK_M, 0),
+        tkw.WorkgroupConstraint(N, BLOCK_N, 1),
+        # tkw.WaveConstraint(M, BLOCK_M, sympy.floor(THREAD_0 / 8)),
+        # tkw.WaveConstraint(N, BLOCK_N, sympy.floor(THREAD_1 / 8)),
+        tkw.HardwareConstraint(
+            threads_per_wave=threads_per_wave,
+            waves_per_block=(1, 1, 1),
+            threads_per_block=(8, 8, 1),
+            vector_shapes={M: block_m, N: block_n},
+        ),
+    ]
+
+    @tkw.wave(constraints)
+    def copy2d(
+        a: tkl.Memory[M, N, GLOBAL_ADDRESS_SPACE, tkl.i32],
+        b: tkl.Memory[M, N, GLOBAL_ADDRESS_SPACE, tkl.i32],
+    ):
+        a_reg = tkw.read(a, elements_per_thread=elements_per_thread)
+        tkw.write(a_reg, b, elements_per_thread=elements_per_thread)
+
+    hyperparams = {
+        BLOCK_M: block_m,
+        BLOCK_N: block_n,
+        M: dim_m,
+        N: dim_n,
+    }
+
+    return copy2d, hyperparams
+
+
+def testCopy2D():
+    torch.manual_seed(0)
+    shape = 8, 8
+    blocks = 8, 8
+    dim_m, dim_n = shape
+    block_m, block_n = blocks
+    override_mlir = False
+
+    a = torch.arange(
+        dim_m * dim_n, device=get_default_device(), dtype=torch.int32
+    ).reshape(dim_m, dim_n)
+
+    transpose, hyperparams = get_copy2d_kernel(dim_m, dim_n, block_m, block_n)
+    hyperparams.update(get_default_scheduling_params())
+
+    asm = None
+    asm_path = pathlib.Path(
+        f"wave_copy2d_{format_shape(shape)}_{format_shape(blocks)}.mlir"
+    )
+    if override_mlir:
+        asm_path = asm_path.with_suffix(".override.mlir")
+        asm = asm_path.read_text()
+
+    options = WaveCompileOptions(
+        subs=hyperparams,
+        waves_per_eu=2,
+        denorm_fp_math_f32="preserve-sign",
+        canonicalize=True,
+        override_mlir=asm,
+    )
+    options = set_default_run_config(options)
+    transpose = wave_compile(options, transpose)
+
+    if not override_mlir and dump_generated_mlir:
+        asm = prettify_mlir(transpose.asm, options)
+        filepath = "out" / asm_path
+        filepath.write_text(asm)
+        print(f"IR dumped to {filepath}")
+
+    # Wave makes unfortunate assumptions about things being contiguous
+    b = torch.zeros_like(a)
+    transpose(a, b)
+    # print(small_tensor_string(a, "a", precision=0, sci_mode=False))
+    assert_close(b, a)
 
 
 def get_copy1d_kernel(dim_n: int, block_n: int):

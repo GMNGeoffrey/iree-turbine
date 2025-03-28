@@ -104,9 +104,16 @@ class HardwareConstraint(Constraint):
 
     threads_per_wave: int
     waves_per_block: Optional[tuple[int, int, int]] = None
+    threads_per_block: Optional[tuple[int, int, int]] = None
     mma_type: Optional[MMAType] = MMAType.F32_16x16x16_F16
     vector_shapes: Optional[dict[IndexSymbol, int]] = None
     max_bits_per_load: int = 128
+
+    def __post_init__(self):
+        if self.threads_per_block is None:
+            self.threads_per_block = (
+                self.waves_per_block[0] * self.threads_per_wave,
+            ) + self.waves_per_block[1:]
 
     def max_elems_per_load(self, element_type: DataType) -> int:
         return self.max_bits_per_load // element_type.bitwidth()
@@ -238,12 +245,6 @@ class HardwareConstraint(Constraint):
             case _:
                 raise ValueError("Unsupported MMA type")
         return offset
-
-    @property
-    def threads_per_block(self) -> tuple[int]:
-        return (
-            self.waves_per_block[0] * self.threads_per_wave,
-        ) + self.waves_per_block[1:]
 
     @property
     def linearized_thread_id(self) -> IndexExpr:
@@ -519,11 +520,12 @@ class WaveConstraint(Constraint):
         """
         old_wave_id = self.wave_id
         assert self.dim == workgroup_constraint.dim, "Dimension mismatch"
-        self.wave_id = hardware_constraint.get_thread_id_from_workgroup_dim(
-            workgroup_constraint.workgroup_dim
+        self.wave_id = floor(
+            hardware_constraint.get_thread_id_from_workgroup_dim(
+                workgroup_constraint.workgroup_dim
+            )
+            / hardware_constraint.threads_per_block[workgroup_constraint.workgroup_dim]
         )
-        if workgroup_constraint.workgroup_dim == 0:
-            self.wave_id = floor(self.wave_id / hardware_constraint.threads_per_wave)
         assert (
             old_wave_id is None or self.wave_id == old_wave_id
         ), f"Conflicting preset wave_id old: {old_wave_id} new: {self.wave_id}"
