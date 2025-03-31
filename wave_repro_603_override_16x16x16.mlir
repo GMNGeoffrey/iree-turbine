@@ -50,7 +50,6 @@ module attributes {transform.with_named_sequence} {
 
         // GPU shuffle here
         %wave_size_i32 = arith.constant 64 : i32
-
         %wave_size = arith.constant 64 : index
         %els_per_thread = arith.constant 4 : index
 

@@ -29,14 +29,18 @@ require_cdna3 = pytest.mark.skipif(
 dump_generated_mlir = int(os.environ.get("WAVE_DUMP_MLIR", 0))
 
 
+def get_test_file_basename(test_name):
+    test_name = (
+        test_name.removeprefix("test_").strip("[]").replace("[", "_").replace("]", "_")
+    )
+    return pathlib.Path(f"wave_{test_name}")
+
+
 def maybe_dump_mlir(asm, test_name):
     if not dump_generated_mlir:
         return
 
-    test_name = (
-        test_name.removeprefix("test_").strip("[]").replace("[", "_").replace("]", "_")
-    )
-    path = pathlib.Path(f"out/wave_{test_name}.mlir")
+    path = "out" / get_test_file_basename(test_name).with_suffix(".mlir")
     path.write_text(asm)
     print(f"MLIR dumped to {path}")
 
